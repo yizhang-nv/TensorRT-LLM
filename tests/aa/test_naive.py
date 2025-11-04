@@ -1,4 +1,3 @@
-import array
 import functools
 import gc
 import itertools
@@ -10,51 +9,43 @@ from contextlib import contextmanager
 from importlib.util import find_spec
 from random import randbytes
 from statistics import median
-from typing import TYPE_CHECKING, Iterator, NamedTuple, cast
+from typing import Iterator, NamedTuple, cast
 
-if not TYPE_CHECKING and find_spec("kv_cache_manager_v2") is not None:
+<<<<<<<< HEAD:tests/unittest/kv_cache_manager_v2/test_kv_cache_manager_v2.py
+if find_spec("kv_cache_manager_v2") is not None:
     from kv_cache_manager_v2 import (
         AttentionLayerConfig,
-        BeamIndex,
         BufferConfig,
-        CacheLevel,
-        CudaStream,
         DiskCacheTierConfig,
         GpuCacheTierConfig,
         HostCacheTierConfig,
         KVCacheManager,
         KVCacheManagerConfig,
-        LayerGroupId,
         LayerId,
         TokenId,
         TokenIdExt,
         _KVCache,
     )
     from kv_cache_manager_v2._block_radix_tree import traverse_post_order
-    from kv_cache_manager_v2._common import GPU_LEVEL, PageStatus, SlidingWindowSize
+    from kv_cache_manager_v2._common import CudaStream, PageStatus, SlidingWindowSize
     from kv_cache_manager_v2._exceptions import OutOfPagesError
     from kv_cache_manager_v2._utils import (
         TemporaryCudaStream,
-        div_up,
         init_cuda_once,
         remove_if,
         round_up,
         typed_range,
-        unwrap_rawref,
+        unwrap_weakref,
     )
 else:
     from tensorrt_llm.runtime.kv_cache_manager_v2 import (
         AttentionLayerConfig,
-        BeamIndex,
         BufferConfig,
-        CacheLevel,
-        CudaStream,
         DiskCacheTierConfig,
         GpuCacheTierConfig,
         HostCacheTierConfig,
         KVCacheManager,
         KVCacheManagerConfig,
-        LayerGroupId,
         LayerId,
         TokenId,
         TokenIdExt,
@@ -62,19 +53,18 @@ else:
     )
     from tensorrt_llm.runtime.kv_cache_manager_v2._block_radix_tree import traverse_post_order
     from tensorrt_llm.runtime.kv_cache_manager_v2._common import (
-        GPU_LEVEL,
+        CudaStream,
         PageStatus,
         SlidingWindowSize,
     )
     from tensorrt_llm.runtime.kv_cache_manager_v2._exceptions import OutOfPagesError
     from tensorrt_llm.runtime.kv_cache_manager_v2._utils import (
         TemporaryCudaStream,
-        div_up,
         init_cuda_once,
         remove_if,
         round_up,
         typed_range,
-        unwrap_rawref,
+        unwrap_weakref,
     )
 
 from dynamic_path_manager import DynamicPathManager
@@ -131,6 +121,7 @@ from tensorrt_llm.runtime.kv_cache_manager_v2 import (  # isort: skip
     TokenIdExt, _KVCache)
 
 seed = int.from_bytes(os.urandom(8), 'little')
+>>>>>>>> 93114cf94 (Init):tests/aa/test_naive.py
 print(f"seed: {seed}")
 random.seed(seed)
 DBG_PRINT = int(os.environ.get("DBG_PRINT", "0")) != 0
@@ -250,12 +241,10 @@ class TestKVCacheManagerV2(unittest.TestCase):
                     BufferConfig(role=Role.VALUE_BLOCK_QUANT, size=block_quant_buf_size),
                 ]
             )
-        disk_path_candidates = ["/workspace/", "/tmp/nvidia-mps/", "/tmp"]
-        disk_path = next(p for p in disk_path_candidates if os.path.exists(p))
         cache_tiers = [
             GpuCacheTierConfig(quota=gpu_quota),
             HostCacheTierConfig(quota=host_quota),
-            DiskCacheTierConfig(quota=disk_quota, path=disk_path),
+            DiskCacheTierConfig(quota=disk_quota, path="/workspace/"),
         ]
         self.cfg = KVCacheManagerConfig(
             tokens_per_block=tokens_per_block,
@@ -330,31 +319,15 @@ class TestNoBatching(TestKVCacheManagerV2):
         # print(f"Time taken: {time_taken} seconds")
         return time_taken
 
-    def run_naive(
-        self,
-        seq_len: int,
-        interval: int = 1,
-        refcheck: bool = True,
-        use_external_page_index_buf: bool = False,
-    ) -> float:
+    def run_naive(self, seq_len: int, interval: int = 1, refcheck: bool = True) -> float:
         prompt_len = 1
         decode_len = seq_len - prompt_len
 
         req_id = 0
         lora_task_id = None
         req0 = self.new_request(req_id, lora_task_id, prompt_len, decode_len)
-        if use_external_page_index_buf:
-            max_num_blocks = div_up(seq_len, self.cfg.tokens_per_block)
-            num_layer_groups = len(self.manager.layer_grouping)
-            page_indices = [
-                array.array("i", [-1]) * max_num_blocks for _ in range(num_layer_groups)
-            ]
-            for id in range(num_layer_groups):
-                req0.kv_cache.set_page_index_buf(
-                    BeamIndex(0), LayerGroupId(id), memoryview(page_indices[id])
-                )
         with TemporaryCudaStream([]) as s:
-            stream = cast(CudaStream, s.handle)
+            stream = s.handle
             kv_cache = req0.kv_cache
             success = kv_cache.resume(stream)
             assert success
@@ -365,23 +338,12 @@ class TestNoBatching(TestKVCacheManagerV2):
         self.manager.clear_reusable_blocks()
         return time_taken
 
-    @parameterized.expand([(False,), (True,)])
-    def test_shrink_capacity(self, use_external_page_index_buf: bool) -> None:
+    def test_shrink_capacity(self) -> None:
         self.prepare(32 << 20, 32 << 20, 1 << 30, 36, 128, 1, kv_buf_size=32768)
         seq_len = 32 * 10
         req0 = self.new_request(0, None, 32, seq_len - 32)
-        if use_external_page_index_buf:
-            max_num_blocks = div_up(seq_len, self.cfg.tokens_per_block)
-            num_layer_groups = len(self.manager.layer_grouping)
-            page_indices = [
-                array.array("i", [-1]) * max_num_blocks for _ in range(num_layer_groups)
-            ]
-            for id in range(num_layer_groups):
-                req0.kv_cache.set_page_index_buf(
-                    BeamIndex(0), LayerGroupId(id), memoryview(page_indices[id])
-                )
         with TemporaryCudaStream([]) as s:
-            stream = cast(CudaStream, s.handle)
+            stream = s.handle
             kv_cache = req0.kv_cache
             success = kv_cache.resume(stream)
             assert success
@@ -392,10 +354,6 @@ class TestNoBatching(TestKVCacheManagerV2):
                 assert success
         s.take_finish_event()
         kv_cache.close()
-
-    def test_small_quota(self) -> None:
-        self.prepare(5619712, 0, 0, 8, None, 0)
-        assert self.manager.get_quota(cast(CacheLevel, GPU_LEVEL)) >= 5619712
 
     # @assert_no_ref_cycle
     def test_sol_mem_utilization(self) -> None:
@@ -408,7 +366,7 @@ class TestNoBatching(TestKVCacheManagerV2):
         # create a request and suspend it. It shall not consume any GPU memory after suspend.
         req0 = self.new_request(0, None, 256, seq_len - 256)
         with TemporaryCudaStream([]) as s:
-            stream = cast(CudaStream, s.handle)
+            stream = s.handle
             success = req0.kv_cache.resume(stream)
             assert success
             self.run_request(req0, 32, False)
@@ -418,7 +376,7 @@ class TestNoBatching(TestKVCacheManagerV2):
         # run another request that will take all the GPU memory
         req1 = self.new_request(0, None, 256, seq_len - 256)
         with TemporaryCudaStream([]) as s:
-            stream = cast(CudaStream, s.handle)
+            stream = s.handle
             success = req1.kv_cache.resume(stream)
             assert success
             self.run_request(req1, 1, True)
@@ -443,7 +401,7 @@ class TestNoBatching(TestKVCacheManagerV2):
         req_id_gen = itertools.count()
         reusable_requests = []
         with TemporaryCudaStream([]) as s:
-            stream = cast(CudaStream, s.handle)
+            stream = s.handle
             for _ in range(num_reusable_requests):
                 req = self.new_request(next(req_id_gen), None, 256, seq_len - 256)
                 reusable_requests.append(req)
@@ -458,7 +416,7 @@ class TestNoBatching(TestKVCacheManagerV2):
                 for block in traverse_post_order(block0):
                     for page in block.storage:
                         if page is not None:
-                            assert unwrap_rawref(page).status == PageStatus.DROPPABLE
+                            assert unwrap_weakref(page).status == PageStatus.DROPPABLE
 
         req0 = reusable_requests[0]
         prompt1 = req0.kv_cache._committed_tokens[: (seq_len // 2 - 7)]
@@ -471,7 +429,7 @@ class TestNoBatching(TestKVCacheManagerV2):
         )
         assert req1.kv_cache.num_committed_tokens == len(prompt1)
         with TemporaryCudaStream([]) as s:
-            stream = cast(CudaStream, s.handle)
+            stream = s.handle
             success = req1.kv_cache.resume(stream)
             assert success
             self.run_request(req1, 32, True)
@@ -480,11 +438,10 @@ class TestNoBatching(TestKVCacheManagerV2):
 
         self.manager.clear_reusable_blocks()
 
-    @parameterized.expand([(False,), (True,)])
     # @assert_no_ref_cycle
-    def test_naive(self, use_external_page_index_buf: bool) -> None:
+    def test_naive(self) -> None:
         self.prepare(256 << 20, 256 << 20, 1 << 30, 36, 128, 48)
-        self.run_naive(512, 1, True, use_external_page_index_buf)
+        self.run_naive(512, 1, True)
 
     @parameterized.expand([(2**i, False) for i in range(12)])
     # @parameterized.expand([(32, True)])
@@ -660,7 +617,6 @@ class TestBatching(TestKVCacheManagerV2):
     @parameterized.expand(
         [
             (1000, 1000, 1024, True, 32, 32),
-            (1000, 1000, 1024, True, 1, 32),
             (100, 100, 128, False, 1, 128),
             (100, 100, 128, False, 4, 64),
         ]
@@ -689,18 +645,17 @@ class TestBatching(TestKVCacheManagerV2):
             profiler = cProfile.Profile()
             profiler.enable()
         tic = time.perf_counter()
-        with TemporaryCudaStream([]) as s, enable_kernel_delay():
-            stream = cast(CudaStream, s.handle)
+        with TemporaryCudaStream([]) as stream, enable_kernel_delay():
             i = itertools.count()
-            self.update_batch(stream)
+            self.update_batch(stream.handle)
             while self.num_finished < self.num_requests:
                 DBG_PRINT and print(  # type: ignore[arg-type]
                     f"Executing batch {next(i)} with size {len(self.batch)}"
                 )
                 assert self.batch
                 if not skip_execution:
-                    self.engine.execute(self.batch, stream)
-                self.update_batch(stream)
+                    self.engine.execute(self.batch, stream.handle)
+                self.update_batch(stream.handle)
         toc = time.perf_counter()
         if profiler is not None:
             profiler.disable()
@@ -711,7 +666,7 @@ class TestBatching(TestKVCacheManagerV2):
                 f"Time taken: {toc - tic} seconds (num_prompt_tokens: {self.acc_num_prompt_tokens}, "
                 f"num_decode_tokens: {self.acc_num_decode_tokens})"
             )
-        s.take_finish_event().synchronize()
+        stream.take_finish_event().synchronize()
 
 
 class TestDisagg(TestKVCacheManagerV2):
@@ -724,7 +679,7 @@ class TestDisagg(TestKVCacheManagerV2):
         kv_cache = self.manager.create_kv_cache(lora_task_id, prompt)
         assert kv_cache.num_committed_tokens == 0
         with TemporaryCudaStream([]) as stream:
-            success = kv_cache.resume(cast(CudaStream, stream.handle))
+            success = kv_cache.resume(stream.handle)
             assert success
             success = kv_cache.resize(prompt_len, prompt_len)
             assert success
