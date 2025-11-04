@@ -4,7 +4,6 @@ from functools import cached_property
 from importlib.util import find_spec
 from typing import NamedTuple
 
-<<<<<<<< HEAD:tests/unittest/kv_cache_manager_v2/fake_engine.py
 if find_spec("kv_cache_manager_v2") is not None:
     from kv_cache_manager_v2 import (
         BeamIndex,
@@ -50,41 +49,6 @@ from dynamic_path_manager import DynamicPathManager
 
 with DynamicPathManager(os.path.dirname(os.path.abspath(__file__))):
     from kernels import check_values, fill_values
-========
-from tensorrt_llm.runtime.kv_cache_manager_v2 import (
-    BeamIndex,
-    CudaStream,
-    KVCacheManagerConfig,
-    LayerId,
-    TokenIdExt,
-    _KVCache,
-)
-from tensorrt_llm.runtime.kv_cache_manager_v2._common import BAD_PAGE_INDEX, NDEBUG, MemAddress
-from tensorrt_llm.runtime.kv_cache_manager_v2._config import AttentionLayerConfig, DataRole
-from tensorrt_llm.runtime.kv_cache_manager_v2._utils import (
-    div_up,
-    exact_div,
-    get_uniform_attribute,
-    overlap,
-    typed_range,
-    value_or,
-)
-
-from kernels import check_values, fill_values
-
-from tensorrt_llm.runtime.kv_cache_manager_v2 import (BeamIndex, CudaStream,
-                                                      KVCacheManagerConfig,
-                                                      LayerId, TokenIdExt,
-                                                      _KVCache)
-from tensorrt_llm.runtime.kv_cache_manager_v2._common import (BAD_PAGE_INDEX,
-                                                              NDEBUG,
-                                                              MemAddress)
-from tensorrt_llm.runtime.kv_cache_manager_v2._config import (
-    AttentionLayerConfig, DataRole)
-from tensorrt_llm.runtime.kv_cache_manager_v2._utils import (
-    div_up, exact_div, get_uniform_attribute, overlap, typed_range, value_or)
->>>>>>>> 93114cf94 (Init):tests/aa/fake_engine.py
-
 
 class Step(NamedTuple):
     kv_cache: _KVCache

@@ -1,4 +1,5 @@
 import atexit
+import os
 import sys
 import threading
 from _thread import LockType
