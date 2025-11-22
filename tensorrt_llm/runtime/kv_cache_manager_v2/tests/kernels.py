@@ -6,8 +6,8 @@ from typing import Iterator
 
 import cuda.bindings.driver as drv
 from cuda.core.experimental import Kernel, Program, ProgramOptions
-from kv_cache_manager_v2._common import (CudaStream, LayerId, MemAddress,
-                                         TokenIdExt)
+from cuda.core.experimental._module import ObjectCode
+from kv_cache_manager_v2._common import CudaStream, LayerId, MemAddress, TokenIdExt
 from kv_cache_manager_v2._utils import _unwrap, div_up, exact_div
 
 _SLEEP_TIME_NS = 0
@@ -22,9 +22,10 @@ def enable_kernel_delay() -> Iterator[None]:
 
 
 @lru_cache(maxsize=None)
-def get_program(debug: bool, max_tokens: int, sleep_time: int):
-    assert max_tokens > 0 and (
-        max_tokens & (max_tokens - 1)) == 0, "max_tokens must be a power of 2"
+def get_program(debug: bool, max_tokens: int, sleep_time: int) -> ObjectCode:
+    assert max_tokens > 0 and (max_tokens & (max_tokens - 1)) == 0, (
+        "max_tokens must be a power of 2"
+    )
     code = r"""
 #if !defined(__CUDACC_RTC__)
 #include <cassert>
@@ -66,7 +67,8 @@ struct Tokens {
     uint32_t tokens[kMAX_TOKENS];
 };
 
-extern "C" __global__ void fillValues(Value* data, uint32_t valuesPerToken, uint32_t layer, uint32_t buf_id, uint32_t beam, __grid_constant__ const Tokens tokens, uint32_t numTokens) {
+extern "C" __global__ void fillValues(Value* data, uint32_t valuesPerToken, uint32_t layer,
+        uint32_t buf_id, uint32_t beam, __grid_constant__ const Tokens tokens, uint32_t numTokens) {
     if (sleepTime > 0) {
         __nanosleep(sleepTime);
     }
@@ -92,7 +94,8 @@ __device__ inline void assertEq(Value const& a, Value const& b) {
     check(a == b);
 }
 
-extern "C" __global__ void checkValues(Value const* data, uint32_t valuesPerToken, uint32_t layer, uint32_t buf_id, uint32_t beam, __grid_constant__ const Tokens tokens, uint32_t numTokens) {
+extern "C" __global__ void checkValues(Value const* data, uint32_t valuesPerToken, uint32_t layer,
+        uint32_t buf_id, uint32_t beam, __grid_constant__ const Tokens tokens, uint32_t numTokens) {
     if (sleepTime > 0) {
         __nanosleep(sleepTime);
     }
@@ -107,11 +110,8 @@ extern "C" __global__ void checkValues(Value const* data, uint32_t valuesPerToke
     assertEq(data[tid], value);
 }
     """
-    macros = [("MAX_TOKENS", str(max_tokens)),
-              ("SLEEP_TIME_NS", str(sleep_time))]
-    program_options = ProgramOptions(
-        std="c++17", lineinfo=True, debug=debug,
-        define_macro=macros)  # type: ignore[arg-type]
+    macros = [("MAX_TOKENS", str(max_tokens)), ("SLEEP_TIME_NS", str(sleep_time))]
+    program_options = ProgramOptions(std="c++17", lineinfo=True, debug=debug, define_macro=macros)  # type: ignore[arg-type]
     if not debug:
         program_options.use_fast_math = True
     prog = Program(code, code_type="c++", options=program_options)
@@ -119,22 +119,21 @@ extern "C" __global__ void checkValues(Value const* data, uint32_t valuesPerToke
     return mod
 
 
-def get_kernel(name: str, num_tokens: int,
-               sleep_time: int) -> tuple[Kernel, int]:
+def get_kernel(name: str, num_tokens: int, sleep_time: int) -> tuple[Kernel, int]:
     assert num_tokens > 0
 
     @lru_cache(maxsize=None)
     def impl(name: str, max_tokens: int, sleep_time: int) -> Kernel:
         assert name in ("fillValues", "checkValues")
-        assert max_tokens != 0 and (
-            max_tokens &
-            (max_tokens - 1)) == 0, "max_tokens must be a power of 2"
+        assert max_tokens != 0 and (max_tokens & (max_tokens - 1)) == 0, (
+            "max_tokens must be a power of 2"
+        )
         debug = False
         # debug = not NDEBUG
         return get_program(debug, max_tokens, sleep_time).get_kernel(name)
 
     # Round up to the next power of two
-    max_tokens = 2**((num_tokens - 1).bit_length())
+    max_tokens = 2 ** ((num_tokens - 1).bit_length())
     return impl(name, max_tokens, sleep_time), max_tokens
 
 
@@ -149,15 +148,21 @@ class Value(ctypes.Structure):
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, Value):
             return NotImplemented
-        return self.token == other.token and self.layer == other.layer and self.buf_id == other.buf_id and self.beam == other.beam
+        return (
+            self.token == other.token
+            and self.layer == other.layer
+            and self.buf_id == other.buf_id
+            and self.beam == other.beam
+        )
 
     def __str__(self) -> str:
-        return f"Value(token={self.token}, layer={self.layer}, buf_id={self.buf_id}, beam={self.beam})"
+        return (
+            f"Value(token={self.token}, layer={self.layer}, buf_id={self.buf_id}, beam={self.beam})"
+        )
 
 
 @lru_cache(maxsize=None)
 def _get_ctypes_struct(max_tokens: int) -> type[ctypes.Structure]:
-
     class Tokens(ctypes.Structure):
         _fields_ = [
             ("tokens", ctypes.c_uint32 * max_tokens),
@@ -167,58 +172,126 @@ def _get_ctypes_struct(max_tokens: int) -> type[ctypes.Structure]:
     return Tokens
 
 
-def _make_tokens(tokens: Sequence[TokenIdExt],
-                 max_tokens: int) -> ctypes.Structure:
+def _make_tokens(tokens: Sequence[TokenIdExt], max_tokens: int) -> ctypes.Structure:
     assert len(tokens) <= max_tokens
     padded = list(tokens) + [0] * (max_tokens - len(tokens))
     Tokens = _get_ctypes_struct(max_tokens)
-    return Tokens(tokens=(ctypes.c_uint32 * max_tokens)(*[
-        t if isinstance(t, int) else int.
-        from_bytes(t[:4], 'little', signed=False) for t in padded
-    ]))
+    return Tokens(
+        tokens=(ctypes.c_uint32 * max_tokens)(
+            *[
+                t if isinstance(t, int) else int.from_bytes(t[:4], "little", signed=False)
+                for t in padded
+            ]
+        )
+    )
 
 
-def fill_values(address: MemAddress, bytes_per_token: int, layer: LayerId,
-                buf_id: int, beam: int, tokens: Sequence[TokenIdExt],
-                stream: CudaStream):
+def fill_values(
+    address: MemAddress,
+    bytes_per_token: int,
+    layer: LayerId,
+    buf_id: int,
+    beam: int,
+    tokens: Sequence[TokenIdExt],
+    stream: CudaStream,
+):
     values_per_token = exact_div(bytes_per_token, ctypes.sizeof(Value))
     num_tokens = len(tokens)
     if num_tokens == 0:
         return
     kernel, max_tokens = get_kernel("fillValues", len(tokens), _SLEEP_TIME_NS)
-    args = (address, values_per_token, layer, buf_id, beam,
-            _make_tokens(tokens, max_tokens), num_tokens)
-    arg_types = (ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32,
-                 ctypes.c_uint32, ctypes.c_uint32, None, ctypes.c_uint32)
+    args = (
+        address,
+        values_per_token,
+        layer,
+        buf_id,
+        beam,
+        _make_tokens(tokens, max_tokens),
+        num_tokens,
+    )
+    arg_types = (
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        None,
+        ctypes.c_uint32,
+    )
     num_threads = values_per_token * num_tokens
     cta_size = 256
     _unwrap(
-        drv.cuLaunchKernel(kernel._handle, div_up(num_threads, cta_size), 1, 1,
-                           cta_size, 1, 1, 0, stream, (args, arg_types), 0))
+        drv.cuLaunchKernel(
+            kernel._handle,
+            div_up(num_threads, cta_size),
+            1,
+            1,
+            cta_size,
+            1,
+            1,
+            0,
+            stream,
+            (args, arg_types),
+            0,
+        )
+    )
 
 
-def check_values(address: MemAddress, bytes_per_token: int, layer: LayerId,
-                 buf_id: int, beam: int, tokens: Sequence[TokenIdExt],
-                 stream: CudaStream):
+def check_values(
+    address: MemAddress,
+    bytes_per_token: int,
+    layer: LayerId,
+    buf_id: int,
+    beam: int,
+    tokens: Sequence[TokenIdExt],
+    stream: CudaStream,
+):
     values_per_token = exact_div(bytes_per_token, ctypes.sizeof(Value))
     num_tokens = len(tokens)
     if num_tokens == 0:
         return
     kernel, max_tokens = get_kernel("checkValues", len(tokens), _SLEEP_TIME_NS)
-    args = (address, values_per_token, layer, buf_id, beam,
-            _make_tokens(tokens, max_tokens), num_tokens)
-    arg_types = (ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32,
-                 ctypes.c_uint32, ctypes.c_uint32, None, ctypes.c_uint32)
+    args = (
+        address,
+        values_per_token,
+        layer,
+        buf_id,
+        beam,
+        _make_tokens(tokens, max_tokens),
+        num_tokens,
+    )
+    arg_types = (
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        None,
+        ctypes.c_uint32,
+    )
     num_threads = values_per_token * num_tokens
     cta_size = 256
     _unwrap(
-        drv.cuLaunchKernel(kernel._handle, div_up(num_threads, cta_size), 1, 1,
-                           cta_size, 1, 1, 0, stream, (args, arg_types), 0))
+        drv.cuLaunchKernel(
+            kernel._handle,
+            div_up(num_threads, cta_size),
+            1,
+            1,
+            cta_size,
+            1,
+            1,
+            0,
+            stream,
+            (args, arg_types),
+            0,
+        )
+    )
 
 
-def debug_dump_tokens(addr: MemAddress, token_bytes: int, num_tokens: int,
-                      stream: CudaStream) -> Iterator[Value]:
-    if (num_tokens == 0):
+def debug_dump_tokens(
+    addr: MemAddress, token_bytes: int, num_tokens: int, stream: CudaStream
+) -> Iterator[Value]:
+    if num_tokens == 0:
         return
     val_size = ctypes.sizeof(Value)
     values_per_token = exact_div(token_bytes, val_size)

@@ -18,14 +18,14 @@ class LogicError(Exception):
     This exception indicates a bug in the code.
     '''
 
-    def __init__(self, message: str):
+    def __init__(self, message: str) -> None:
         super().__init__(message)
 
 
 class CuError(RuntimeError):
     error_code: drv.CUresult
 
-    def __init__(self, error_code: drv.CUresult):
+    def __init__(self, error_code: drv.CUresult) -> None:
         self.error_code = error_code
         err, err_str = drv.cuGetErrorString(error_code)
         if err != drv.CUresult.CUDA_SUCCESS:
@@ -35,7 +35,7 @@ class CuError(RuntimeError):
 
 class CuOOMError(CuError, OutOfMemoryError):
 
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__(drv.CUresult.CUDA_ERROR_OUT_OF_MEMORY)
 
 
