@@ -1,61 +1,68 @@
-# Currently, our nvfp4 kernels require that KV data and its corresponding KV block scale use the same block index, but different base address.
-# As the ratio between KV data size and KV block scale size is fixed, we can simply use a pool with smaller block size and the same number of blocks for block scale.
-import abc
+# Currently, our nvfp4 kernels require that KV data and its corresponding KV block scale use the same
+# block index, but different base address.
+# As the ratio between KV data size and KV block scale size is fixed, we can simply use a pool with
+# smaller block size and the same number of blocks for block scale.
 import os
 from dataclasses import dataclass, field
-from typing import NewType
+from typing import NewType, Protocol
 
 from ._common import CacheTier, LayerId
 
+# The data role of a buffer inside one layer.
+# Must be unique for each buffer inside a layer.
+# Examples: "key", "value", "key_block_quant", "value_block_quant".
 DataRole = NewType("DataRole", str)
-DataRole.__doc__ = '''
-The data role of a buffer inside one layer.
-Must be unique for each buffer inside a layer.
-Examples: "key", "value", "key_block_quant", "value_block_quant".
-'''
 
 
-@dataclass(slots=True)
-class CacheTierConfig(abc.ABC):
+class CacheTierConfig(Protocol):
+    """Protocol for cache tier configuration."""
+
     quota: int  # in bytes
 
     @property
-    @abc.abstractmethod
-    def tier(self) -> CacheTier:
-        ...
+    def tier(self) -> CacheTier: ...
 
-    def assert_valid(self):
-        assert self.quota > 0, "Quota must be positive"
+    def assert_valid(self) -> None: ...
 
 
 @dataclass(slots=True)
-class GpuCacheTierConfig(CacheTierConfig):
+class GpuCacheTierConfig:
+    quota: int  # in bytes
 
     @property
     def tier(self) -> CacheTier:
         return CacheTier.GPU_MEM
 
+    def assert_valid(self) -> None:
+        assert self.quota > 0, "Quota must be positive"
+
 
 @dataclass(slots=True)
-class HostCacheTierConfig(CacheTierConfig):
+class HostCacheTierConfig:
+    quota: int  # in bytes
 
     @property
     def tier(self) -> CacheTier:
         return CacheTier.HOST_MEM
 
+    def assert_valid(self) -> None:
+        assert self.quota > 0, "Quota must be positive"
+
 
 @dataclass(slots=True)
-class DiskCacheTierConfig(CacheTierConfig):
+class DiskCacheTierConfig:
+    quota: int  # in bytes
     path: str  # a folder where we will store data as files
 
     @property
     def tier(self) -> CacheTier:
         return CacheTier.DISK
 
-    def assert_valid(self):
-        assert os.path.isdir(
-            self.path
-        ), f"Disk path {self.path} does not exist or is not a directory"
+    def assert_valid(self) -> None:
+        assert self.quota > 0, "Quota must be positive"
+        assert os.path.isdir(self.path), (
+            f"Disk path {self.path} does not exist or is not a directory"
+        )
 
 
 @dataclass(slots=True)
@@ -81,9 +88,10 @@ class AttentionLayerConfig:
     def window_size(self) -> int | None:
         return self.sliding_window_size
 
-    def __post_init__(self):
-        assert len(set(buffer.role for buffer in self.buffers)) == len(
-            self.buffers), "duplicate buffer role"
+    def __post_init__(self) -> None:
+        assert len(set(buffer.role for buffer in self.buffers)) == len(self.buffers), (
+            "duplicate buffer role"
+        )
 
 
 @dataclass(slots=True)
@@ -101,6 +109,7 @@ class KVCacheManagerConfig:
     """
     Configuration for the KV cache manager.
     """
+
     tokens_per_block: int
     # if you have p-tuning tokens, include them. Only needed for multi-modal.
     vocab_size: int
@@ -110,13 +119,15 @@ class KVCacheManagerConfig:
     # AttentionLayerConfig.layer_id should not duplicate
     layers: list[AttentionLayerConfig]
 
-    # When memory utilization is above this threshold, KV cache resuming will fail. This helps reserving some memory for KVCache growth and avoids frequent suspend/resume for dynamic batch size.
+    # When memory utilization is above this threshold, KV cache resuming will fail. This helps
+    # reserving some memory for KVCache growth and avoids frequent suspend/resume for dynamic batch size.
     max_util_for_resume: float = field(default=0.9)
 
     # unsupported yet
     helix_config: HelixConfig | None = field(default=None)
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         assert self.cache_tiers and self.cache_tiers[0].tier == CacheTier.GPU_MEM
-        assert len(set(layer.layer_id for layer in self.layers)) == len(
-            self.layers), "duplicate layer id"
+        assert len(set(layer.layer_id for layer in self.layers)) == len(self.layers), (
+            "duplicate layer id"
+        )

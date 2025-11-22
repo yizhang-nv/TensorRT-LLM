@@ -9,20 +9,25 @@ import cuda.bindings.driver as drv
 
 # avoid importing the whole tensorrt_llm module, which takes time during debugging.
 sys.path.append(os.path.abspath(os.path.join(__file__, "../../..")))
-import bindings
+from bindings.internal.batch_manager.kv_cache_manager_v2_utils import (
+    DiskAddress,
+    DiskToDiskTask,
+    DiskToHostTask,
+    HostToDiskTask,
+    MemToMemTask,
+    copy_device_to_device,
+    copy_device_to_host,
+    copy_disk_to_disk,
+    copy_disk_to_host,
+    copy_host_to_device,
+    copy_host_to_disk,
+    copy_host_to_host,
+)
 
 sys.path.pop()
 
 from ._common import Address, CacheTier, CudaStream, MemAddress
-from ._utils import (CachedCudaEvent, HomoTuple, HostMem, _unwrap, div_up,
-                     stream_wait_events)
-
-nb_utils = bindings.internal.batch_manager.kv_cache_manager_v2_utils
-DiskAddress = nb_utils.DiskAddress
-DiskToDiskTask = nb_utils.DiskToDiskTask
-DiskToHostTask = nb_utils.DiskToHostTask
-HostToDiskTask = nb_utils.HostToDiskTask
-MemToMemTask = nb_utils.MemToMemTask
+from ._utils import CachedCudaEvent, HomoTuple, HostMem, _unwrap, div_up, stream_wait_events
 
 
 class CopyTask(NamedTuple):
@@ -30,89 +35,96 @@ class CopyTask(NamedTuple):
     src: Address
 
 
-def _copy_gpu_to_gpu(tasks: Sequence[CopyTask], num_bytes: int,
-                     stream: CudaStream):
+def _copy_gpu_to_gpu(tasks: Sequence[CopyTask], num_bytes: int, stream: CudaStream):
     _unwrap(
         drv.CUresult(
-            nb_utils.copy_device_to_device(
-                [MemToMemTask(dst, src) for dst, src in tasks], num_bytes,
-                stream)))
+            copy_device_to_device([MemToMemTask(dst, src) for dst, src in tasks], num_bytes, stream)
+        )
+    )
 
 
-def _copy_host_to_host(tasks: Sequence[CopyTask], num_bytes: int,
-                       stream: CudaStream):
+def _copy_host_to_host(tasks: Sequence[CopyTask], num_bytes: int, stream: CudaStream):
     _unwrap(
         drv.CUresult(
-            nb_utils.copy_host_to_host(
-                [MemToMemTask(dst, src) for dst, src in tasks], num_bytes,
-                stream)))
+            copy_host_to_host([MemToMemTask(dst, src) for dst, src in tasks], num_bytes, stream)
+        )
+    )
 
 
-def _copy_disk_to_disk(tasks: Sequence[CopyTask], num_bytes: int,
-                       stream: CudaStream):
+def _copy_disk_to_disk(tasks: Sequence[CopyTask], num_bytes: int, stream: CudaStream):
     _unwrap(
         drv.CUresult(
-            nb_utils.copy_disk_to_disk(
+            copy_disk_to_disk(
                 [
                     DiskToDiskTask(
                         DiskAddress(
                             dst.fd,  # type: ignore[attr-defined]
-                            dst.pos),  # type: ignore[attr-defined]
+                            dst.pos,  # type: ignore[attr-defined]
+                        ),  # type: ignore[attr-defined]
                         DiskAddress(
                             src.fd,  # type: ignore[attr-defined]
-                            src.pos))  # type: ignore[attr-defined]
+                            src.pos,  # type: ignore[attr-defined]
+                        ),
+                    )  # type: ignore[attr-defined]
                     for dst, src in tasks
                 ],
                 num_bytes,
-                stream)))
+                stream,
+            )
+        )
+    )
 
 
-def _copy_gpu_to_host(tasks: Sequence[CopyTask], num_bytes: int,
-                      stream: CudaStream):
+def _copy_gpu_to_host(tasks: Sequence[CopyTask], num_bytes: int, stream: CudaStream):
     _unwrap(
         drv.CUresult(
-            nb_utils.copy_device_to_host(
-                [MemToMemTask(dst, src) for dst, src in tasks], num_bytes,
-                stream)))
+            copy_device_to_host([MemToMemTask(dst, src) for dst, src in tasks], num_bytes, stream)
+        )
+    )
 
 
-def _copy_host_to_gpu(tasks: Sequence[CopyTask], num_bytes: int,
-                      stream: CudaStream):
+def _copy_host_to_gpu(tasks: Sequence[CopyTask], num_bytes: int, stream: CudaStream):
     _unwrap(
         drv.CUresult(
-            nb_utils.copy_host_to_device(
-                [MemToMemTask(dst, src) for dst, src in tasks], num_bytes,
-                stream)))
+            copy_host_to_device([MemToMemTask(dst, src) for dst, src in tasks], num_bytes, stream)
+        )
+    )
 
 
-def _copy_disk_to_host(tasks: Sequence[CopyTask], num_bytes: int,
-                       stream: CudaStream):
+def _copy_disk_to_host(tasks: Sequence[CopyTask], num_bytes: int, stream: CudaStream):
     _unwrap(
         drv.CUresult(
-            nb_utils.copy_disk_to_host(
+            copy_disk_to_host(
                 [
-                    DiskToHostTask(dst, DiskAddress(
-                        src.fd, src.pos))  # type: ignore[attr-defined]
+                    DiskToHostTask(dst, DiskAddress(src.fd, src.pos))  # type: ignore[attr-defined]
                     for dst, src in tasks
                 ],
                 num_bytes,
-                stream)))
+                stream,
+            )
+        )
+    )
 
 
-def _copy_host_to_disk(tasks: Sequence[CopyTask], num_bytes: int,
-                       stream: CudaStream):
+def _copy_host_to_disk(tasks: Sequence[CopyTask], num_bytes: int, stream: CudaStream):
     _unwrap(
         drv.CUresult(
-            nb_utils.copy_host_to_disk(
+            copy_host_to_disk(
                 [
                     HostToDiskTask(
                         DiskAddress(
                             dst.fd,  # type: ignore[attr-defined]
-                            dst.pos),  # type: ignore[attr-defined]
-                        src) for dst, src in tasks
+                            dst.pos,
+                        ),  # type: ignore[attr-defined]
+                        src,
+                    )
+                    for dst, src in tasks
                 ],
                 num_bytes,
-                stream)))
+                stream,
+            )
+        )
+    )
 
 
 Copier = Callable[[Sequence[CopyTask], int, CudaStream], None]
@@ -143,7 +155,7 @@ def get_copier(dst: CacheTier, src: CacheTier) -> Copier | HomoTuple[Copier]:
 
 
 class StagingBufferManager:
-    __slots__ = ('mutex', 'buffer', 'grains', 'next')
+    __slots__ = ("mutex", "buffer", "grains", "next")
     GRANULARITY: ClassVar[int] = 1 << 20
 
     @dataclass(slots=True)
@@ -156,20 +168,19 @@ class StagingBufferManager:
     grains: list[GrainMetadata]
     next: int
 
-    def __init__(self, size: int):
+    def __init__(self, size: int) -> None:
         assert size % self.GRANULARITY == 0
         self.mutex = threading.Lock()
         num_grains = size // self.GRANULARITY
         self.buffer = HostMem(size)
         self.grains = [
-            self.GrainMetadata(threading.Lock(), CachedCudaEvent.NULL)
-            for _ in range(num_grains)
+            self.GrainMetadata(threading.Lock(), CachedCudaEvent.NULL) for _ in range(num_grains)
         ]
         self.next = 0
 
     @property
     def size(self) -> int:
-        'Requesting more than this will fail.'
+        "Requesting more than this will fail."
         assert len(self.grains) * self.GRANULARITY == self.buffer.size
         return self.buffer.size
 
@@ -178,18 +189,21 @@ class StagingBufferManager:
         return len(self.grains)
 
     def _suggest_next_max_size_unsafe(self) -> int:
-        'Requesting more than this may degrade performance. Must be called with self.mutex held.'
+        "Requesting more than this may degrade performance. Must be called with self.mutex held."
         return self.GRANULARITY * (self.num_grains - self.next)
 
     # max_size is just a hint, the actual size may be smaller.
-    def new(self, min_size: int, max_size: int,
-            stream: CudaStream) -> 'StagingBufferManager.StagingBuffer':
-        'min_size is the min required size. max_size is for best efforts. Your should query the actual size after entering the context.'
+    def new(
+        self, min_size: int, max_size: int, stream: CudaStream
+    ) -> "StagingBufferManager.StagingBuffer":
+        """
+        min_size is the min required size. max_size is for best efforts. Your should query the actual
+        size after entering the context.
+        """
         return self.StagingBuffer(self, min_size, max_size, stream)
 
     class StagingBuffer:
-        __slots__ = ('manager', 'min_size', 'max_size', '_size', 'start_grain',
-                     'stream')
+        __slots__ = ("manager", "min_size", "max_size", "_size", "start_grain", "stream")
         manager: "StagingBufferManager"
         min_size: int
         max_size: int
@@ -197,8 +211,9 @@ class StagingBufferManager:
         start_grain: int
         stream: CudaStream
 
-        def __init__(self, manager: "StagingBufferManager", min_size: int,
-                     max_size: int, stream: CudaStream):
+        def __init__(
+            self, manager: "StagingBufferManager", min_size: int, max_size: int, stream: CudaStream
+        ):
             self.manager = manager
             self.min_size = min_size
             self.max_size = max_size
@@ -206,8 +221,9 @@ class StagingBufferManager:
 
         @property
         def address(self) -> MemAddress:
-            return MemAddress(self.manager.buffer.address +
-                              self.start_grain * self.manager.GRANULARITY)
+            return MemAddress(
+                self.manager.buffer.address + self.start_grain * self.manager.GRANULARITY
+            )
 
         @property
         def size(self) -> int:
@@ -218,19 +234,15 @@ class StagingBufferManager:
             return div_up(self._size, self.manager.GRANULARITY)
 
         @property
-        def grains(self) -> list['StagingBufferManager.GrainMetadata']:
-            return self.manager.grains[self.start_grain:self.start_grain +
-                                       self.num_grains]
+        def grains(self) -> list["StagingBufferManager.GrainMetadata"]:
+            return self.manager.grains[self.start_grain : self.start_grain + self.num_grains]
 
-        def __enter__(self):
+        def __enter__(self) -> "StagingBufferManager.StagingBuffer":
             manager = self.manager
             if self.min_size > manager.size:
-                raise ValueError(
-                    f"Requested min_size {self.min_size} is too large for the manager"
-                )
+                raise ValueError(f"Requested min_size {self.min_size} is too large for the manager")
             with manager.mutex:
-                self._size = min(self.max_size,
-                                 manager._suggest_next_max_size_unsafe())
+                self._size = min(self.max_size, manager._suggest_next_max_size_unsafe())
                 self.start_grain = manager.next
                 manager.next += self.num_grains
                 assert manager.next <= manager.num_grains
@@ -246,7 +258,7 @@ class StagingBufferManager:
                 stream_wait_events(self.stream, lock_and_consume_events())
                 return self
 
-        def __exit__(self, exc_type, exc_value, traceback):
+        def __exit__(self, exc_type, exc_value, traceback) -> None:
             event = CachedCudaEvent(self.stream)
             for grain in reversed(self.grains):
                 grain.ready_event = event
@@ -254,10 +266,10 @@ class StagingBufferManager:
 
 
 class CopyEngine:
-    __slots__ = ("_staging_buffer_manager", )
+    __slots__ = ("_staging_buffer_manager",)
     _staging_buffer_manager: StagingBufferManager | None
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._staging_buffer_manager = None
 
     @property
@@ -266,40 +278,55 @@ class CopyEngine:
             self._staging_buffer_manager = StagingBufferManager(64 << 20)
         return self._staging_buffer_manager
 
-    # @TODO: Use a dedicated stream for each different Copier, take set[CachedCudaEvent] instead of stream, and return a new CachedCudaEvent.
-    def transfer(self, dst_cache_tier: CacheTier, src_cache_tier: CacheTier,
-                 num_bytes: int, tasks: Sequence[CopyTask],
-                 stream: CudaStream) -> None:
+    # @TODO: Use a dedicated stream for each different Copier, take set[CachedCudaEvent] instead of
+    # stream, and return a new CachedCudaEvent.
+    def transfer(
+        self,
+        dst_cache_tier: CacheTier,
+        src_cache_tier: CacheTier,
+        num_bytes: int,
+        tasks: Sequence[CopyTask],
+        stream: CudaStream,
+    ) -> None:
         copier = get_copier(dst_cache_tier, src_cache_tier)
         if not isinstance(copier, tuple):
             return copier(tasks, num_bytes, stream)
-        assert len(
-            copier) == 2, "for now, we only support 2 copiers via host memory"
+        assert len(copier) == 2, "for now, we only support 2 copiers via host memory"
         manager = self.staging_buffer_manager
         remaining = tasks
         while remaining:
-            with manager.new(num_bytes, num_bytes * len(remaining),
-                             stream) as buf:
+            with manager.new(num_bytes, num_bytes * len(remaining), stream) as buf:
                 addr = buf.address
                 n = buf.size // num_bytes
                 assert n <= len(remaining)
                 batch = remaining[:n]
-                copier[0]([
-                    CopyTask(MemAddress(addr + num_bytes * i), t.src)
-                    for i, t in enumerate(batch)
-                ], num_bytes, buf.stream)
-                copier[1]([
-                    CopyTask(t.dst, MemAddress(addr + num_bytes * i))
-                    for i, t in enumerate(batch)
-                ], num_bytes, buf.stream)
+                copier[0](
+                    [
+                        CopyTask(MemAddress(addr + num_bytes * i), t.src)
+                        for i, t in enumerate(batch)
+                    ],
+                    num_bytes,
+                    buf.stream,
+                )
+                copier[1](
+                    [
+                        CopyTask(t.dst, MemAddress(addr + num_bytes * i))
+                        for i, t in enumerate(batch)
+                    ],
+                    num_bytes,
+                    buf.stream,
+                )
                 remaining = remaining[n:]
 
 
 _copy_engine = CopyEngine()
 
 
-def batched_copy(dst_cache_tier: CacheTier, src_cache_tier: CacheTier,
-                 num_bytes: int, tasks: Sequence[CopyTask],
-                 stream: CudaStream) -> None:
-    _copy_engine.transfer(dst_cache_tier, src_cache_tier, num_bytes, tasks,
-                          stream)
+def batched_copy(
+    dst_cache_tier: CacheTier,
+    src_cache_tier: CacheTier,
+    num_bytes: int,
+    tasks: Sequence[CopyTask],
+    stream: CudaStream,
+) -> None:
+    _copy_engine.transfer(dst_cache_tier, src_cache_tier, num_bytes, tasks, stream)

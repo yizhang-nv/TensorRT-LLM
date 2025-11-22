@@ -1,3 +1,5 @@
+from typing import ClassVar, Type
+
 import cuda.bindings.driver as drv
 
 from ._common import MemAddress
@@ -6,16 +8,15 @@ from ._utils import ItemHolderWithSharedPool, PooledFactoryBase, _unwrap, div_up
 
 # Physical memory
 class NativePhysMemAllocator:
-    __slots__ = ('_device_id', '_size', '_prop', '_outstanding_handles')
+    __slots__ = ("_device_id", "_size", "_prop", "_outstanding_handles")
 
     _device_id: int
     _size: int
     _prop: drv.CUmemAllocationProp
     _outstanding_handles: set[int]  # allocated byt not released
 
-    def __init__(self, size: int):
-        self._device_id = _unwrap(
-            drv.cuCtxGetDevice())  # type: ignore[assignment]
+    def __init__(self, size: int) -> None:
+        self._device_id = _unwrap(drv.cuCtxGetDevice())
         self._size = size
         prop = drv.CUmemAllocationProp()
         prop.type = drv.CUmemAllocationType.CU_MEM_ALLOCATION_TYPE_PINNED
@@ -26,12 +27,12 @@ class NativePhysMemAllocator:
 
     def allocate(self) -> drv.CUmemGenericAllocationHandle:
         handle = _unwrap(drv.cuMemCreate(self._size, self._prop, 0))
-        int_handle = int(handle)  # type: ignore[assignment]
+        int_handle = int(handle)
         assert (int_handle not in self._outstanding_handles) and int_handle != 0
         self._outstanding_handles.add(int_handle)
         return handle
 
-    def release(self, handle: drv.CUmemGenericAllocationHandle):
+    def release(self, handle: drv.CUmemGenericAllocationHandle) -> None:
         if handle == drv.CUmemGenericAllocationHandle(0):
             return
         assert int(handle) in self._outstanding_handles
@@ -54,37 +55,33 @@ class NativePhysMemAllocator:
 
 
 class PhysMem(ItemHolderWithSharedPool[drv.CUmemGenericAllocationHandle]):
-    SIZE: int = 32 << 20
+    SIZE: ClassVar[int] = 32 << 20
     __slots__ = ()
 
 
-class PooledPhysMemAllocator(PooledFactoryBase[drv.CUmemGenericAllocationHandle,
-                                               PhysMem]):
-    _Holder = PhysMem
-    __slots__ = ("device_id", )
+class PooledPhysMemAllocator(PooledFactoryBase[drv.CUmemGenericAllocationHandle, PhysMem]):
+    _Holder: ClassVar[Type[PhysMem]] = PhysMem
+    __slots__ = ("device_id",)
     device_id: int
 
-    def __init__(self):
+    def __init__(self) -> None:
         raw_alloc = NativePhysMemAllocator(PhysMem.SIZE)
         self.device_id = raw_alloc.device_id
-        super().__init__(lambda: raw_alloc.allocate(),
-                         lambda handle: raw_alloc.release(handle))
+        super().__init__(lambda: raw_alloc.allocate(), lambda handle: raw_alloc.release(handle))
 
 
 # Virtual memory
 class VirtMem:
-    __slots__ = ('_vm_size', '_allocator', '_address', '_pm_stack',
-                 '_access_desc')
+    __slots__ = ("_vm_size", "_allocator", "_address", "_pm_stack", "_access_desc")
     _vm_size: int
     _allocator: PooledPhysMemAllocator
     _address: drv.CUdeviceptr
     _pm_stack: list[PhysMem]
     _access_desc: drv.CUmemAccessDesc
 
-    def __init__(self,
-                 vm_size: int,
-                 phys_mem_allocator: PooledPhysMemAllocator,
-                 init_num_phys_mem: int = 0):
+    def __init__(
+        self, vm_size: int, phys_mem_allocator: PooledPhysMemAllocator, init_num_phys_mem: int = 0
+    ):
         assert vm_size % PhysMem.SIZE == 0
         self._allocator = phys_mem_allocator
         device_id = phys_mem_allocator.device_id
@@ -97,7 +94,7 @@ class VirtMem:
         self._access_desc.flags = drv.CUmemAccess_flags.CU_MEM_ACCESS_FLAGS_PROT_READWRITE
         self.extend(init_num_phys_mem)
 
-    def destroy(self):
+    def destroy(self) -> None:
         if self._vm_size == 0:
             return
         while self._pm_stack:
@@ -106,44 +103,43 @@ class VirtMem:
         self._address = drv.CUdeviceptr(0)
         self._vm_size = 0
 
-    def __del__(self):
+    def __del__(self) -> None:
         self.destroy()
 
-    def extend(self, num_phys_mem: int):
+    def extend(self, num_phys_mem: int) -> None:
         old_num_phys_mem = self.num_phys_mem
         try:
             for _ in range(num_phys_mem):
                 self._push(self._allocator.create())
-        except Exception:  # to make realloc behave like normal realloc, we need to rollback if out of memory
+        except (
+            Exception
+        ):  # to make realloc behave like normal realloc, we need to rollback if out of memory
             while self.num_phys_mem > old_num_phys_mem:
                 self._pop().close()
             raise
 
-    def shrink(self, num_phys_mem: int):
+    def shrink(self, num_phys_mem: int) -> None:
         for _ in range(num_phys_mem):
             self._pop().close()
 
     # Different from normal realloc, this function never changes the pointer.
-    def realloc(self, num_bytes: int):
+    def realloc(self, num_bytes: int) -> None:
         required_num_phys_mem = div_up(num_bytes, PhysMem.SIZE)
         if required_num_phys_mem > self.num_phys_mem:
             self.extend(required_num_phys_mem - self.num_phys_mem)
         elif required_num_phys_mem < self.num_phys_mem:
             self.shrink(self.num_phys_mem - required_num_phys_mem)
 
-    def _push(self, phy_mem: PhysMem):
+    def _push(self, phy_mem: PhysMem) -> None:
         assert PhysMem.SIZE * (len(self._pm_stack) + 1) <= self._vm_size
-        vm_ptr = drv.CUdeviceptr(self.address +
-                                 PhysMem.SIZE * len(self._pm_stack))
+        vm_ptr = drv.CUdeviceptr(self.address + PhysMem.SIZE * len(self._pm_stack))
         _unwrap(drv.cuMemMap(vm_ptr, PhysMem.SIZE, 0, phy_mem.handle, 0))
-        _unwrap(
-            drv.cuMemSetAccess(vm_ptr, PhysMem.SIZE, (self._access_desc, ), 1))
+        _unwrap(drv.cuMemSetAccess(vm_ptr, PhysMem.SIZE, (self._access_desc,), 1))
         self._pm_stack.append(phy_mem)
 
     def _pop(self) -> PhysMem:
         assert self._pm_stack
-        vm_ptr = drv.CUdeviceptr(self.address + PhysMem.SIZE *
-                                 (len(self._pm_stack) - 1))
+        vm_ptr = drv.CUdeviceptr(self.address + PhysMem.SIZE * (len(self._pm_stack) - 1))
         _unwrap(drv.cuMemUnmap(vm_ptr, PhysMem.SIZE))
         return self._pm_stack.pop()
 
