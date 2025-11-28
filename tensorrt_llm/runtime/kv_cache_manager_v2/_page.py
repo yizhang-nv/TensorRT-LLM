@@ -224,7 +224,7 @@ class CommittedPage(Page):
         if block is not None:
             block.unset_page(
                 self.life_cycle,
-                self.manager.kv_cache_manager._life_cycles.get_life_cycle(self.life_cycle),
+                self.manager._life_cycles.get_life_cycle(self.life_cycle),
             )
         Page.__del__(self)
 
