@@ -33,7 +33,7 @@ from ._kv_cache import _KVCache
 
 
 class KVCacheManager:
-    __slots__ = ("_init_config", "_life_cycles", "_radix_tree", "_storage", "__weakref__")
+    __slots__ = ("_init_config", "_life_cycles", "_radix_tree", "_storage")
     _init_config: KVCacheManagerConfig
     _life_cycles: LifeCycleRegistry
     _radix_tree: BlockRadixTree
@@ -45,7 +45,7 @@ class KVCacheManager:
         self._life_cycles = LifeCycleRegistry(config)
         self._radix_tree = BlockRadixTree(self._life_cycles, config.tokens_per_block)
         storage_config = create_storage_config(config)
-        self._storage = StorageManager(self, storage_config)
+        self._storage = StorageManager(self._life_cycles, storage_config)
 
     def __del__(self) -> None:
         self.clear_reusable_blocks()

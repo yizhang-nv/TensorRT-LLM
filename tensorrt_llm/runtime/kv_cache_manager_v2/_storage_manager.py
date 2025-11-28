@@ -2,7 +2,7 @@ import os
 import warnings
 import weakref
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Iterator, Sequence, cast
+from typing import Iterator, Sequence, cast
 
 from ._common import (
     GPU_LEVEL,
@@ -17,13 +17,9 @@ from ._common import (
 )
 from ._config import CacheTierConfig, DataRole, DiskCacheTierConfig
 from ._copy_engine import CopyTask, batched_copy
-
-if TYPE_CHECKING:
-    from ._core._kv_cache_manager import KVCacheManager
-
 from ._eviction_controller import EvictablePage, PerLevelEvictionController
 from ._exceptions import OutOfPagesError
-from ._life_cycle_registry import LifeCycleId
+from ._life_cycle_registry import LifeCycleId, LifeCycleRegistry
 from ._page import Page
 from ._storage import CacheLevelStorage
 from ._storage._config import BufferAttr, BufferId, StorageConfig
@@ -52,7 +48,6 @@ from ._utils import (
     remove_if,
     typed_enumerate,
     typed_range,
-    unwrap_weakref,
 )
 
 
@@ -128,7 +123,7 @@ class StorageStatistics:
 
 class StorageManager:
     __slots__ = (
-        "_parent",
+        "_life_cycles",
         "_layer_to_life_cycle_ids",
         "_slot_to_page_indices",
         "_buffer_attr",
@@ -137,7 +132,7 @@ class StorageManager:
         "_cached_num_pool_groups",
         "__weakref__",
     )
-    _parent: weakref.ref["KVCacheManager"]
+    _life_cycles: LifeCycleRegistry
     _layer_to_life_cycle_ids: TypedIndexList[LayerId, LifeCycleId]
     _slot_to_page_indices: TypedIndexList[LifeCycleId, int]
     _buffer_attr: dict[BufferId, BufferAttr]
@@ -145,11 +140,11 @@ class StorageManager:
     _levels: TypedIndexList[CacheLevel, CacheLevelManager]
     _cached_num_pool_groups: PoolGroupIndex
 
-    def __init__(self, parent: "KVCacheManager", config: StorageConfig) -> None:
+    def __init__(self, life_cycles: LifeCycleRegistry, config: StorageConfig) -> None:
         assert config.cache_tiers[GPU_LEVEL].tier == CacheTier.GPU_MEM, (
             "The first cache tier must be GPU memory"
         )
-        self._parent = weakref.ref(parent)
+        self._life_cycles = life_cycles
         self._layer_to_life_cycle_ids = config.layer_to_life_cycle_ids()
         self._slot_to_page_indices = config.slot_to_page_indices()
         self._buffer_attr = config.buffer_attributes()
@@ -210,8 +205,8 @@ class StorageManager:
         return ret
 
     @property
-    def kv_cache_manager(self) -> "KVCacheManager":
-        return unwrap_weakref(self._parent)
+    def life_cycles(self) -> LifeCycleRegistry:
+        return self._life_cycles
 
     @property
     def num_life_cycles(self) -> LifeCycleId:
