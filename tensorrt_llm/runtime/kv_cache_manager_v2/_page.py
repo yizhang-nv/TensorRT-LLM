@@ -21,14 +21,11 @@ if TYPE_CHECKING:
     from ._core._kv_cache import _KVCache
     from ._storage_manager import StorageManager
 
-import numba as nb
-import numpy as np
-import numpy.typing as npt
 
 from ._eviction_controller import NodeRef
 from ._exceptions import LogicError
 from ._life_cycle_registry import LifeCycleId
-from ._storage._core import Slot, SlotId
+from ._storage._core import Slot
 from ._utils import (
     CachedCudaEvent,
     assert_critical,
@@ -320,11 +317,18 @@ class _UniqPageLock:
         page.ready_event = merge_events(self.finish_events)
         assert self.holder is not None
         self.holder._lock = None
-        # delete holder first, so if nobody holds the page elsewhere, it becomes droppable immediately,
-        # before we hand it over to eviction controller.
-        self.holder = None
-        if page.manager.is_evictable(page):
-            page.manager.schedule_for_eviction(page)
+        if False:
+            if page.manager.is_evictable(page):
+                page.manager.schedule_for_eviction(page)
+        else:
+            # Optimized code path:
+            # delete holder first, so if nobody holds the page elsewhere, it becomes droppable immediately,
+            # before we hand it over to eviction controller.
+            self.holder = None
+            # if it's not droppable, then it means self.holder=None had no impact. We need to schedule it
+            # for eviction as usual.
+            if page.status != PageStatus.DROPPABLE and page.manager.is_evictable(page):
+                page.manager.schedule_for_eviction(page)
 
 
 class LockOwner(NamedTuple):
@@ -332,13 +336,6 @@ class LockOwner(NamedTuple):
     beam_index: BeamIndex
     ordinal: BlockOrdinal
     life_cycle: LifeCycleId
-
-
-@nb.njit(cache=True)
-def _compute_page_indices(
-    slot_id: SlotId, scale: npt.NDArray[np.int32], bias: npt.NDArray[np.int32]
-) -> npt.NDArray[np.int32]:
-    return slot_id * scale + bias
 
 
 @dataclass(slots=True, init=False, weakref_slot=True)
