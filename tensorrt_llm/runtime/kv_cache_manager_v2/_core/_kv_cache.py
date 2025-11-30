@@ -249,11 +249,9 @@ class _KVCache:
         if self.status == self.Status.CLOSED:
             return
         self.stop_committing()
-        if self.status == self.Status.ACTIVE:
-            # suspend first, just to record finish_event.
-            self.suspend()
         assert NDEBUG or self._check_sanity()
-        self._clear_blocks()
+        with self._record_event():
+            self._clear_blocks()
         self._status = self.Status.CLOSED
 
     def __del__(self) -> None:
