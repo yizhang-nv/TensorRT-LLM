@@ -7,7 +7,7 @@ import unittest
 from contextlib import contextmanager
 from random import randbytes
 from statistics import median
-from typing import Iterator, NamedTuple
+from typing import Iterator, NamedTuple, cast
 from weakref import WeakKeyDictionary
 
 from kv_cache_manager_v2 import (
@@ -391,6 +391,8 @@ class TestBatching(TestKVCacheManagerV2):
         if self.num_created >= self.num_requests:
             raise ValueError("Too many requests created")
 
+        token_id_gen = cast(Iterator[TokenId], self._token_id_gen)
+
         def gen_length() -> int:
             return random.randint(int(self.avg_length * 0.6), int(self.avg_length * 1.4))
 
@@ -398,21 +400,21 @@ class TestBatching(TestKVCacheManagerV2):
             if len(self.past_sequences) >= 32 and random.random() < 0.2:
                 # continued multi-round dialog
                 prompt = random.choice(self.past_sequences) + [
-                    self.next_token() for _ in range(gen_length())
+                    next(token_id_gen) for _ in range(gen_length())
                 ]
             else:
                 # new dialog
                 if len(self.past_sequences) < 32 or random.random() < 0.5:
                     # completely new prompt
-                    prompt = [self.next_token() for _ in range(gen_length())]
+                    prompt = [next(token_id_gen) for _ in range(gen_length())]
                 else:
                     # with reused tokens
                     reused = random.choice(self.past_sequences)
                     prompt = reused[: random.randint(0, min(gen_length(), len(reused)))] + [
-                        self.next_token() for _ in range(gen_length())
+                        next(token_id_gen) for _ in range(gen_length())
                     ]
         else:
-            prompt = [self.next_token() for _ in range(gen_length())]
+            prompt = [next(token_id_gen) for _ in range(gen_length())]
         decode_len = gen_length()
         lora_task_id = None
         kv_cache = self.manager.create_kv_cache(
@@ -452,10 +454,11 @@ class TestBatching(TestKVCacheManagerV2):
             kv_cache.close()
             self.num_finished += 1
         # fill input for remaining requests and increase capacity for them
+        token_id_gen = cast(Iterator[TokenId], self._token_id_gen)
         for s in self.batch:
             assert not s.input
             length = min(self.interval, self.seq_len_dict[s.kv_cache] - len(s.history))
-            s.input.extend(self.next_token() for _ in range(length))
+            s.input.extend(next(token_id_gen) for _ in range(length))
         for i in itertools.count():
             if i >= len(self.batch):
                 break
