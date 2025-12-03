@@ -1,10 +1,10 @@
 import hashlib
-import weakref
 from typing import TYPE_CHECKING, Iterator, Sequence, TypeVar, cast
 
+from . import rawref
 from ._common import NDEBUG, BlockOrdinal, PageStatus, TokenId, TokenIdExt
 from ._life_cycle_registry import LifeCycle, LifeCycleId, LifeCycleRegistry
-from ._utils import HomoTuple, TypedIndexList, chunked, filled_list, unwrap_weakref
+from ._utils import HomoTuple, TypedIndexList, chunked, filled_list, unwrap_rawref
 
 if TYPE_CHECKING:
     from ._page import CommittedPage
@@ -81,10 +81,10 @@ def get_tree(block: "RootBlock | Block") -> "BlockRadixTree":
     return node
 
 
-def remove_subtree(root: "RootBlock | Block") -> list[weakref.ref["CommittedPage"]]:
+def remove_subtree(root: "RootBlock | Block") -> list[rawref.ref["CommittedPage"]]:
     # taking O(1) space
     # remove leaf blocks one by one, in post-order
-    ret: list[weakref.ref["CommittedPage"]] = []
+    ret: list[rawref.ref["CommittedPage"]] = []
     block: "RootBlock | Block" = root
     while True:
         if block.next:
@@ -183,19 +183,24 @@ def _add_or_get_existing(
 
 
 class RootBlock:
-    __slots__ = ("_prev", "key", "next", "lora_task_id", "__weakref__")
+    __slots__ = ("_prev", "key", "next", "lora_task_id", "__rawref__")
     key: BlockKey
     lora_task_id: int | None
-    _prev: weakref.ref["BlockRadixTree"]
+    _prev: rawref.ref["BlockRadixTree"]
     next: Children["Block"]
+    __rawref__: rawref.ref["RootBlock"]
 
     def __init__(self, lora_task_id: int | None, prev: "BlockRadixTree") -> None:
         self.key = self.make_key(lora_task_id)
         assert self.key not in prev.next, "Root block already exists"
         self.lora_task_id = lora_task_id
-        self._prev = weakref.ref(prev)
+        self._prev = rawref.ref(prev)
         self.next = {}
+        self.__rawref__ = rawref.NULL
         prev.next[self.key] = self
+
+    def __del__(self) -> None:
+        self.__rawref__.invalidate()
 
     @property
     def ordinal(self) -> BlockOrdinal:
@@ -203,7 +208,7 @@ class RootBlock:
 
     @property
     def prev(self) -> "BlockRadixTree":
-        return unwrap_weakref(self._prev)
+        return unwrap_rawref(self._prev)
 
     @property
     def num_life_cycles(self) -> LifeCycleId:
@@ -223,15 +228,16 @@ class Block:
     A block of tokens. Manages data for all layers.
     """
 
-    __slots__ = ("key", "tokens", "ordinal", "_prev", "next", "storage", "__weakref__")
+    __slots__ = ("key", "tokens", "ordinal", "_prev", "next", "storage", "__rawref__")
     key: BlockKey
     tokens: Sequence[TokenIdExt]
     ordinal: BlockOrdinal
-    _prev: weakref.ref["Block | RootBlock"]
+    _prev: rawref.ref["Block | RootBlock"]
     next: Children["Block"]
+    __rawref__: rawref.ref["Block"]
 
     # indexed with LifeCycleId
-    storage: TypedIndexList[LifeCycleId, weakref.ref["CommittedPage"] | None]
+    storage: TypedIndexList[LifeCycleId, rawref.ref["CommittedPage"] | None]
 
     @staticmethod
     def make_key(prev_key: BlockKey, tokens: Sequence[TokenIdExt]) -> BlockKey:
@@ -242,9 +248,10 @@ class Block:
         self.key = self.make_key(prev.key, tokens)
         self.tokens = tokens
         self.ordinal = BlockOrdinal(prev.ordinal + 1)
-        self._prev = weakref.ref(prev)
+        self._prev = rawref.ref(prev)
         self.next = {}
         self.storage = filled_list(None, prev.num_life_cycles)
+        self.__rawref__ = rawref.NULL
         # a Block is useless if all its tokens are covered by a sibling block. Raise UselessBlockError if so.
         if self.key in prev.next:
             raise UselessBlockError(prev.next[self.key])
@@ -267,9 +274,10 @@ class Block:
         prev.next[self.key] = self
 
     def __del__(self) -> None:
+        self.__rawref__.invalidate()
         for ref in self.storage:
             if ref is not None and ref() is not None:
-                page = unwrap_weakref(ref)
+                page = unwrap_rawref(ref)
                 if page.status == PageStatus.DROPPABLE:
                     if page.scheduled_for_eviction:
                         page.manager.exclude_from_eviction(page)
@@ -291,7 +299,7 @@ class Block:
 
     @property
     def prev(self) -> "Block | RootBlock":
-        return unwrap_weakref(self._prev)
+        return unwrap_rawref(self._prev)
 
     def unset_page(self, lc_idx: LifeCycleId, lc: LifeCycle) -> None:
         if self.storage[lc_idx] is None:
@@ -302,7 +310,7 @@ class Block:
             pages = remove_subtree(self)
             for r in pages:
                 if r() is not None:
-                    page = unwrap_weakref(r)
+                    page = unwrap_rawref(r)
                     assert page.status == PageStatus.DROPPABLE
                     if page.scheduled_for_eviction:
                         page.manager.exclude_from_eviction(page)
@@ -335,15 +343,20 @@ class Block:
 
 
 class BlockRadixTree:
-    __slots__ = ("_life_cycles", "_tokens_per_block", "next", "__weakref__")
+    __slots__ = ("_life_cycles", "_tokens_per_block", "next", "__rawref__")
     _life_cycles: LifeCycleRegistry
     _tokens_per_block: int
     next: Children[RootBlock]
+    __rawref__: rawref.ref["BlockRadixTree"]
 
     def __init__(self, life_cycles: LifeCycleRegistry, tokens_per_block: int) -> None:
         self._life_cycles = life_cycles
         self._tokens_per_block = tokens_per_block
         self.next = {}
+        self.__rawref__ = rawref.NULL
+
+    def __del__(self) -> None:
+        self.__rawref__.invalidate()
 
     def add_or_get_existing(self, lora_task_id: int | None) -> RootBlock:
         key = RootBlock.make_key(lora_task_id)
@@ -363,10 +376,10 @@ class BlockRadixTree:
     def num_life_cycles(self) -> LifeCycleId:
         return self.life_cycles.size
 
-    def clear(self) -> list[weakref.ref["CommittedPage"]]:
+    def clear(self) -> list[rawref.ref["CommittedPage"]]:
         # taking O(1) space
         # remove leaf blocks one by one, in post-order
-        ret: list[weakref.ref["CommittedPage"]] = []
+        ret: list[rawref.ref["CommittedPage"]] = []
         while self.next:
             block = next(iter(self.next.values()))
             ret.extend(remove_subtree(block))

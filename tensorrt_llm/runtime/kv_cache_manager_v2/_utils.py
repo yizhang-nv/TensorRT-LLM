@@ -33,6 +33,7 @@ from typing import (
 import cuda.bindings.driver as drv
 import cuda.bindings.runtime as cudart
 
+from . import rawref
 from ._common import NDEBUG, CudaStream
 from ._exceptions import CuError, CuOOMError, DiskOOMError, HostOOMError
 
@@ -103,6 +104,13 @@ def unwrap_weakref(ref: weakref.ref[T]) -> T:
     if obj is not None:
         return obj
     raise ValueError("Dereferencing a dangling weakref")
+
+
+def unwrap_rawref(ref: rawref.ref[T]) -> T:
+    obj = ref()
+    if obj is not None:
+        return obj
+    raise ValueError("Dereferencing a dangling rawref")
 
 
 def map_optional(value: T | None, func: Callable[[T], U]) -> U | None:

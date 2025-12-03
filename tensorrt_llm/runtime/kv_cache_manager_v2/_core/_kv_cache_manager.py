@@ -27,7 +27,7 @@ from .._utils import (
     init_cuda_once,
     typed_enumerate,
     typed_range,
-    unwrap_weakref,
+    unwrap_rawref,
 )
 from ._kv_cache import _KVCache
 
@@ -52,8 +52,8 @@ class KVCacheManager:
 
     def clear_reusable_blocks(self) -> None:
         for ref in self._radix_tree.clear():
-            assert unwrap_weakref(ref).status == PageStatus.DROPPABLE
-            self._storage.exclude_from_eviction(unwrap_weakref(ref))
+            assert unwrap_rawref(ref).status == PageStatus.DROPPABLE
+            self._storage.exclude_from_eviction(unwrap_rawref(ref))
         for level in self._storage._levels:
             for pg_idx in typed_range(level.storage.num_pool_groups):
                 assert level.controller.num_evictable_pages(pg_idx) == 0

@@ -1,8 +1,8 @@
-import weakref
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, NamedTuple, cast
 
+from . import rawref
 from ._block_radix_tree import Block
 from ._common import (
     BAD_PAGE_INDEX,
@@ -34,7 +34,7 @@ from ._utils import (
     merge_events,
     partition,
     stream_wait_events,
-    unwrap_weakref,
+    unwrap_rawref,
 )
 
 
@@ -42,12 +42,12 @@ from ._utils import (
 # So we prefer inheritance over composition to save some memory.
 @dataclass(slots=True)
 class Page(Slot):
-    _manager: weakref.ref["StorageManager"]
+    _manager: rawref.ref["StorageManager"]
     life_cycle: LifeCycleId
     cache_level: CacheLevel
     _priority: Priority
-    # _holder is either None or a valid weakref.
-    _holder: weakref.ref["_PageHolder"] | None
+    # _holder is either None or a valid rawref.
+    _holder: rawref.ref["_PageHolder"] | None
     node_ref: NodeRef | None
 
     def __del__(self) -> None:
@@ -58,7 +58,7 @@ class Page(Slot):
 
     @property
     def manager(self) -> "StorageManager":
-        return unwrap_weakref(self._manager)
+        return unwrap_rawref(self._manager)
 
     @property
     def priority(self) -> Priority:
@@ -67,10 +67,10 @@ class Page(Slot):
     # prevent dropping
     def hold(self) -> "_PageHolder":
         if self._holder is not None:
-            return unwrap_weakref(self._holder)
+            return unwrap_rawref(self._holder)
         holder = object.__new__(_PageHolder)
         holder._setup(self)
-        self._holder = weakref.ref(holder)
+        self._holder = rawref.ref(holder)
         controller = self.manager
         if self.scheduled_for_eviction and not controller.is_evictable(self):
             controller.exclude_from_eviction(self)
@@ -93,10 +93,10 @@ class Page(Slot):
     def status(self) -> PageStatus:
         if self._holder is None:
             return PageStatus.DROPPABLE
-        lock_ref = unwrap_weakref(self._holder)._lock
+        lock_ref = unwrap_rawref(self._holder)._lock
         if lock_ref is None:
             return PageStatus.HELD
-        assert unwrap_weakref(lock_ref) is not None
+        assert unwrap_rawref(lock_ref) is not None
         return PageStatus.LOCKED
 
     @property
@@ -111,7 +111,7 @@ class Page(Slot):
 @dataclass(slots=True)
 class UncommittedPage(Page):
     # @TODO: consider move this to _PageHolder
-    kv_cache: weakref.ref["_KVCache"]
+    kv_cache: rawref.ref["_KVCache"]
     ordinal: BlockOrdinal
     beam_index: BeamIndex
 
@@ -130,7 +130,7 @@ class UncommittedPage(Page):
         slot: Slot,
         beam_index: BeamIndex = BeamIndex(0),
     ):
-        self.kv_cache = weakref.ref(kv_cache)
+        self.kv_cache = rawref.ref(kv_cache)
         self.ordinal = ordinal
         self.beam_index = beam_index
         manager = kv_cache.manager
@@ -139,7 +139,7 @@ class UncommittedPage(Page):
             self,
             None,
             CachedCudaEvent.NULL,
-            weakref.ref(manager._storage),
+            rawref.ref(manager._storage),
             life_cycle,
             cache_level,
             priority,
@@ -164,7 +164,7 @@ class UncommittedPage(Page):
         self._slot_id = None
         self.ready_event = CachedCudaEvent.NULL
         assert committed_page.has_valid_slot
-        block.storage[self.life_cycle] = weakref.ref(committed_page)
+        block.storage[self.life_cycle] = rawref.ref(committed_page)
         return committed_page
 
     def __del__(self) -> None:
@@ -173,9 +173,9 @@ class UncommittedPage(Page):
 
         if not NDEBUG:
             assert_critical(
-                len(unwrap_weakref(self.kv_cache)._blocks) <= self.ordinal
+                len(unwrap_rawref(self.kv_cache)._blocks) <= self.ordinal
                 or check_page(
-                    unwrap_weakref(self.kv_cache)
+                    unwrap_rawref(self.kv_cache)
                     ._blocks[self.ordinal]
                     .pages[self.beam_index][self.life_cycle]
                 )
@@ -183,9 +183,10 @@ class UncommittedPage(Page):
         Page.__del__(self)
 
 
-@dataclass(slots=True, weakref_slot=True)
+@dataclass(slots=True)
 class CommittedPage(Page):
-    block: weakref.ref["Block"]
+    block: rawref.ref["Block"]
+    __rawref__: rawref.ref["CommittedPage"]
 
     @staticmethod
     def is_committed() -> bool:
@@ -200,12 +201,13 @@ class CommittedPage(Page):
         slot: Slot,
         priority: Priority,
     ):
-        self.block = weakref.ref(block)
+        self.block = rawref.ref(block)
+        self.__rawref__ = rawref.NULL
         Page.__init__(
             self,
             None,
             CachedCudaEvent.NULL,
-            weakref.ref(storage),
+            rawref.ref(storage),
             life_cycle,
             cache_level,
             priority,
@@ -215,6 +217,7 @@ class CommittedPage(Page):
         self.set_slot(slot)
 
     def __del__(self) -> None:
+        self.__rawref__.invalidate()
         block = self.block()
         # block may be None when rebase happens, i.e. another block with the same key is committed,
         # replacing it, but the page is still used by a _KVCache.
@@ -226,12 +229,13 @@ class CommittedPage(Page):
         Page.__del__(self)
 
 
-@dataclass(slots=True, init=False, weakref_slot=True)
+@dataclass(slots=True, init=False)
 class _PageHolder:
     "Prevents pages from being dropped."
 
     page: Page
-    _lock: weakref.ref["_UniqPageLock"] | None
+    _lock: rawref.ref["_UniqPageLock"] | None
+    __rawref__: rawref.ref["_PageHolder"]
 
     def __init__(self) -> None:
         raise LogicError("Use page.hold() instead")
@@ -239,8 +243,10 @@ class _PageHolder:
     def _setup(self, page: Page) -> None:
         self.page = page
         self._lock = None
+        self.__rawref__ = rawref.NULL
 
     def __del__(self) -> None:
+        self.__rawref__.invalidate()
         if not NDEBUG:
             assert_critical(self._lock is None)
         self.page._holder = None
@@ -268,9 +274,9 @@ class _PageHolder:
         if self._lock is None:
             lock = object.__new__(_UniqPageLock)
             lock._setup(self)
-            self._lock = weakref.ref(lock)
+            self._lock = rawref.ref(lock)
         else:
-            lock = unwrap_weakref(self._lock)
+            lock = unwrap_rawref(self._lock)
         if self.page.scheduled_for_eviction:
             manager = self.page.manager
             manager.exclude_from_eviction(self.page)
@@ -278,12 +284,13 @@ class _PageHolder:
         return lock.share(kv_cache, beam_index, ordinal, life_cycle, skip_wait)
 
 
-@dataclass(slots=True, init=False, weakref_slot=True)
+@dataclass(slots=True, init=False)
 class _UniqPageLock:
     "Locks pages to prevent eviction."
 
     holder: _PageHolder | None
     finish_events: list[CachedCudaEvent]
+    __rawref__: rawref.ref["_UniqPageLock"]
 
     def __init__(self) -> None:
         raise LogicError("Use page.lock() or holder.lock() instead")
@@ -293,6 +300,7 @@ class _UniqPageLock:
             raise ValueError("Lock can be applied only on GPU memory pages.")
         self.holder = holder
         self.finish_events = []
+        self.__rawref__ = rawref.NULL
 
     def share(
         self,
@@ -311,6 +319,7 @@ class _UniqPageLock:
         return self.holder.page
 
     def __del__(self) -> None:
+        self.__rawref__.invalidate()
         page = self.page
         if not NDEBUG:
             assert_critical(page.cache_level == CacheLevel(0) and not page.scheduled_for_eviction)
@@ -332,7 +341,7 @@ class _UniqPageLock:
 
 
 class LockOwner(NamedTuple):
-    kv_cache: weakref.ref["_KVCache"]
+    kv_cache: rawref.ref["_KVCache"]
     beam_index: BeamIndex
     ordinal: BlockOrdinal
     life_cycle: LifeCycleId
@@ -372,7 +381,7 @@ class _SharedPageLock:
         self._uniq_lock = uniq_lock
         if not skip_wait:
             self.page.ready_event.wait_in_stream(kv_cache.cuda_stream)
-        self._user = LockOwner(weakref.ref(kv_cache), beam_index, ordinal, life_cycle)
+        self._user = LockOwner(rawref.ref(kv_cache), beam_index, ordinal, life_cycle)
         new_index = self._get_page_index()
         old_index = kv_cache._update_page_index(beam_index, ordinal, life_cycle, new_index)
         assert old_index == BAD_PAGE_INDEX
@@ -384,9 +393,9 @@ class _SharedPageLock:
     def unlock(self) -> Page:
         assert self._uniq_lock is not None
         page = self.page
-        self._uniq_lock.finish_events.append(unwrap_weakref(self._user.kv_cache).finish_event)
+        self._uniq_lock.finish_events.append(unwrap_rawref(self._user.kv_cache).finish_event)
         new_index = BAD_PAGE_INDEX
-        old_index = unwrap_weakref(self._user.kv_cache)._update_page_index(
+        old_index = unwrap_rawref(self._user.kv_cache)._update_page_index(
             self._user.beam_index, self._user.ordinal, self._user.life_cycle, new_index
         )
         assert NDEBUG or old_index == self._get_page_index()
@@ -394,7 +403,7 @@ class _SharedPageLock:
         return page
 
     def _get_page_index(self) -> PageIndex:
-        storage = unwrap_weakref(self._user.kv_cache).manager._storage
+        storage = unwrap_rawref(self._user.kv_cache).manager._storage
         num_buffers_per_slot = storage._slot_to_page_indices[self._user.life_cycle]
         return PageIndex(self.page.slot_id * num_buffers_per_slot)
 

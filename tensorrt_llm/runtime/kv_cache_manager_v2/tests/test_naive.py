@@ -8,7 +8,6 @@ from contextlib import contextmanager
 from random import randbytes
 from statistics import median
 from typing import Iterator, NamedTuple, cast
-from weakref import WeakKeyDictionary
 
 from kv_cache_manager_v2 import (
     AttentionLayerConfig,
@@ -363,7 +362,7 @@ class TestBatching(TestKVCacheManagerV2):
     num_requests: int
     avg_length: int
     past_sequences: list[list[TokenIdExt]]
-    seq_len_dict: WeakKeyDictionary[_KVCache, int]
+    seq_len_dict: dict[_KVCache, int]
     batch: list[Step]
     suspended: list[Step]
     num_created: int
@@ -377,7 +376,7 @@ class TestBatching(TestKVCacheManagerV2):
     def setUp(self) -> None:
         super().setUp()
         self.past_sequences = list[list[TokenIdExt]]()
-        self.seq_len_dict = WeakKeyDictionary()
+        self.seq_len_dict = dict[_KVCache, int]()
         self.batch = list[Step]()
         self.suspended = list[Step]()
         self.num_finished = 0
@@ -452,6 +451,7 @@ class TestBatching(TestKVCacheManagerV2):
             if seq_len < self.avg_length * 3:
                 self.past_sequences.append(kv_cache._committed_tokens[:seq_len])
             kv_cache.close()
+            self.seq_len_dict.pop(kv_cache)
             self.num_finished += 1
         # fill input for remaining requests and increase capacity for them
         token_id_gen = cast(Iterator[TokenId], self._token_id_gen)

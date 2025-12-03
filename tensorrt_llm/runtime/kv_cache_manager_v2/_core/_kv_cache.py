@@ -1,12 +1,12 @@
 import array
 import enum
-import weakref
 from collections.abc import Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from itertools import chain
 from typing import TYPE_CHECKING, Any, Callable, ClassVar, Iterable, Iterator, Type, cast
 
+from .. import rawref
 from .._block_radix_tree import Block, UselessBlockError
 from .._common import (
     BAD_PAGE_INDEX,
@@ -53,7 +53,7 @@ from .._utils import (
     typed_map,
     typed_range,
     unwrap_optional,
-    unwrap_weakref,
+    unwrap_rawref,
     value_or,
 )
 
@@ -155,7 +155,7 @@ class _KVCache:
         "_num_committed_blocks",
         "_finish_event",
         "_tokens_per_block",
-        "__weakref__",
+        "__rawref__",
     )
 
     Status: ClassVar[Type[_Status]] = _Status
@@ -216,6 +216,7 @@ class _KVCache:
         self._num_committed_blocks = BlockOrdinal(0)
         self._finish_event = None
         self._tokens_per_block = manager.tokens_per_block
+        self.__rawref__ = rawref.NULL
         if input_tokens is not None:
             self._setup_for_reuse(input_tokens)
         assert NDEBUG or self._check_sanity()
@@ -255,6 +256,7 @@ class _KVCache:
         self._status = self.Status.CLOSED
 
     def __del__(self) -> None:
+        self.__rawref__.invalidate()
         self.close()
 
     @property
@@ -586,7 +588,7 @@ class _KVCache:
                 if page is None:
                     continue
                 p = page.convert_to_committed(tree_block)
-                tree_block.storage[lc] = weakref.ref(p)
+                tree_block.storage[lc] = rawref.ref(p)
                 # The page comes from uncommitted page of self, so safe to skip wait.
                 beam_block[lc] = (
                     p.lock(self, beam_idx, ordinal, lc, skip_wait=True) if locked else p.hold()
@@ -881,7 +883,7 @@ class _KVCache:
                 typed_range(stale_start), typed_range(stale_end, BlockOrdinal(len(matched)))
             ):
                 block = self._block(ordinal, beam_idx)
-                holder = unwrap_weakref(unwrap_optional(matched[ordinal][0].storage[lc_idx])).hold()
+                holder = unwrap_rawref(unwrap_optional(matched[ordinal][0].storage[lc_idx])).hold()
                 if matched[ordinal][1] == tokens_per_block:
                     block[lc_idx] = holder
                     continue

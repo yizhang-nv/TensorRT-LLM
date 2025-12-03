@@ -1,9 +1,9 @@
 import os
 import warnings
-import weakref
 from dataclasses import dataclass
 from typing import Iterator, Sequence, cast
 
+from . import rawref
 from ._common import (
     GPU_LEVEL,
     NDEBUG,
@@ -128,7 +128,7 @@ class StorageManager:
         "_life_cycle_grouping",
         "_levels",
         "_cached_num_pool_groups",
-        "__weakref__",
+        "__rawref__",
     )
     _life_cycles: LifeCycleRegistry
     _layer_to_life_cycle_ids: TypedIndexList[LayerId, LifeCycleId]
@@ -137,8 +137,10 @@ class StorageManager:
     _life_cycle_grouping: TypedIndexList[LifeCycleId, PoolGroupIndex]
     _levels: TypedIndexList[CacheLevel, CacheLevelManager]
     _cached_num_pool_groups: PoolGroupIndex
+    __rawref__: rawref.ref["StorageManager"]
 
     def __init__(self, life_cycles: LifeCycleRegistry, config: StorageConfig) -> None:
+        self.__rawref__ = rawref.NULL
         assert config.cache_tiers[GPU_LEVEL].tier == CacheTier.GPU_MEM, (
             "The first cache tier must be GPU memory"
         )
@@ -165,6 +167,9 @@ class StorageManager:
         self._cached_num_pool_groups = get_uniform_attribute(
             self._levels, lambda level: level.storage.num_pool_groups
         )
+
+    def __del__(self) -> None:
+        self.__rawref__.invalidate()
 
     def get_pool_group_index(self, life_cycle: LifeCycleId) -> PoolGroupIndex:
         return self._life_cycle_grouping[life_cycle]
@@ -293,10 +298,10 @@ class StorageManager:
                 num_evicted = len(evicted[pg_idx])
                 assert NDEBUG or all(p.status == PageStatus.DROPPABLE for p in evicted[pg_idx])
                 if not NDEBUG:
-                    dbg_weakrefs = [weakref.ref(p) for p in evicted[pg_idx]]
+                    dbg_rawrefs = [rawref.ref(p) for p in evicted[pg_idx]]
                 evicted[pg_idx].clear()
                 if not NDEBUG:
-                    assert all(p() is None for p in dbg_weakrefs)  # type: ignore[arg-type]
+                    assert all(p() is None for p in dbg_rawrefs)  # type: ignore[arg-type]
                 new_free_cnt = storage.get_num_free_slots(pg_idx)
                 # GC of some pages may trigger removal of radix tree blocks and some other pages.
                 assert new_free_cnt >= num_evicted + old_free_cnt
