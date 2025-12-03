@@ -16,7 +16,7 @@ class NativePhysMemAllocator:
     _outstanding_handles: set[int]  # allocated byt not released
 
     def __init__(self, size: int) -> None:
-        self._device_id = _unwrap(drv.cuCtxGetDevice())
+        self._device_id = int(_unwrap(drv.cuCtxGetDevice()))
         self._size = size
         prop = drv.CUmemAllocationProp()
         prop.type = drv.CUmemAllocationType.CU_MEM_ALLOCATION_TYPE_PINNED

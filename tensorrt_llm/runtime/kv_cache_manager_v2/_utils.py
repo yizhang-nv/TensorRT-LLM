@@ -659,7 +659,7 @@ class CachedCudaEvent(ItemHolderBase[drv.CUevent]):
     _pool: ClassVar[SimplePool[drv.CUevent] | None] = None
     NULL: ClassVar["_NullCudaEvent"]
 
-    def __init__(self, stream: drv.CUstream) -> None:
+    def __init__(self, stream: CudaStream) -> None:
         super().__init__()
         self._record(stream)
 
@@ -688,14 +688,14 @@ class CachedCudaEvent(ItemHolderBase[drv.CUevent]):
         _unwrap(drv.cuEventSynchronize(ev))
         self.close()
 
-    def wait_in_stream(self, stream: drv.CUstream) -> None:
+    def wait_in_stream(self, stream: CudaStream) -> None:
         # Manually inlined for better performance.
         ev = self._item
         if ev is None:
             return
         _unwrap(drv.cuStreamWaitEvent(stream, ev, 0))
 
-    def _record(self, stream: drv.CUstream) -> None:
+    def _record(self, stream: CudaStream) -> None:
         """
         Prefer new event instead of recording an existing event.
         """
@@ -731,7 +731,7 @@ CachedCudaEvent.NULL = _NullCudaEvent()
 
 
 # @TODO: consider do this in a single batch call to C++.
-def stream_wait_events(stream: drv.CUstream, events: Iterable[CachedCudaEvent]) -> None:
+def stream_wait_events(stream: CudaStream, events: Iterable[CachedCudaEvent]) -> None:
     "Batched wait for multiple events with deduplication first."
     if not isinstance(events, Set):
         events = set(events)
@@ -739,13 +739,13 @@ def stream_wait_events(stream: drv.CUstream, events: Iterable[CachedCudaEvent]) 
         ev.wait_in_stream(stream)
 
 
-class CachedCudaStream(ItemHolderBase[drv.CUstream]):
+class CachedCudaStream(ItemHolderBase[CudaStream]):
     """
     A cached non-blocking CUDA stream.
     """
 
     __slots__ = ()
-    _pool: ClassVar[SimplePool[drv.CUstream] | None] = None
+    _pool: ClassVar[SimplePool[CudaStream] | None] = None
 
     def __init__(self) -> None:
         super().__init__()
@@ -766,10 +766,12 @@ class CachedCudaStream(ItemHolderBase[drv.CUstream]):
         return 0, int(self.get())
 
     @property
-    def pool(self) -> SimplePool[drv.CUstream]:
+    def pool(self) -> SimplePool[CudaStream]:
         if CachedCudaStream._pool is None:
-            CachedCudaStream._pool = SimplePool[drv.CUstream](
-                lambda: _unwrap(drv.cuStreamCreate(drv.CUstream_flags.CU_STREAM_NON_BLOCKING)),
+            CachedCudaStream._pool = SimplePool[CudaStream](
+                lambda: CudaStream(
+                    int(_unwrap(drv.cuStreamCreate(drv.CUstream_flags.CU_STREAM_NON_BLOCKING)))
+                ),
                 lambda stream: _unwrap(drv.cuStreamDestroy(stream)),
                 init_size=128,
             )

@@ -68,8 +68,7 @@ class Page(Slot):
     def hold(self) -> "_PageHolder":
         if self._holder is not None:
             return unwrap_rawref(self._holder)
-        holder = object.__new__(_PageHolder)
-        holder._setup(self)
+        holder = _PageHolder(self)
         self._holder = rawref.ref(holder)
         controller = self.manager
         if self.scheduled_for_eviction and not controller.is_evictable(self):
@@ -229,18 +228,15 @@ class CommittedPage(Page):
         Page.__del__(self)
 
 
-@dataclass(slots=True, init=False)
+@dataclass(slots=True)
 class _PageHolder:
     "Prevents pages from being dropped."
 
     page: Page
-    _lock: rawref.ref["_UniqPageLock"] | None
-    __rawref__: rawref.ref["_PageHolder"]
+    _lock: rawref.ref["_UniqPageLock"] | None = None
+    __rawref__: rawref.ref["_PageHolder"] = field(default_factory=lambda: rawref.NULL)
 
-    def __init__(self) -> None:
-        raise LogicError("Use page.hold() instead")
-
-    def _setup(self, page: Page) -> None:
+    def __init__(self, page: Page) -> None:
         self.page = page
         self._lock = None
         self.__rawref__ = rawref.NULL
@@ -259,8 +255,9 @@ class _PageHolder:
             if block is None or block.is_orphan:
                 page.manager.exclude_from_eviction(page)
         elif self.page.scheduled_for_eviction:
-            page = cast(UncommittedPage, self.page)
-            page.manager.exclude_from_eviction(page)
+            assert isinstance(self.page, UncommittedPage)
+            # page = cast(UncommittedPage, self.page)
+            self.page.manager.exclude_from_eviction(self.page)
 
     # Prevent eviction. You need to migrate the page to GPU later.
     def lock(
@@ -272,8 +269,7 @@ class _PageHolder:
         skip_wait: bool = False,
     ) -> "_SharedPageLock":
         if self._lock is None:
-            lock = object.__new__(_UniqPageLock)
-            lock._setup(self)
+            lock = _UniqPageLock(self)
             self._lock = rawref.ref(lock)
         else:
             lock = unwrap_rawref(self._lock)
@@ -284,18 +280,15 @@ class _PageHolder:
         return lock.share(kv_cache, beam_index, ordinal, life_cycle, skip_wait)
 
 
-@dataclass(slots=True, init=False)
+@dataclass(slots=True)
 class _UniqPageLock:
     "Locks pages to prevent eviction."
 
     holder: _PageHolder | None
     finish_events: list[CachedCudaEvent]
-    __rawref__: rawref.ref["_UniqPageLock"]
+    __rawref__: rawref.ref["_UniqPageLock"] = field(default_factory=lambda: rawref.NULL)
 
-    def __init__(self) -> None:
-        raise LogicError("Use page.lock() or holder.lock() instead")
-
-    def _setup(self, holder: _PageHolder) -> None:
+    def __init__(self, holder: _PageHolder) -> None:
         if holder.page.cache_level != CacheLevel(0):
             raise ValueError("Lock can be applied only on GPU memory pages.")
         self.holder = holder
