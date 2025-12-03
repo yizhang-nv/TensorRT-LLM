@@ -5,6 +5,7 @@ import threading
 from _thread import LockType
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+import torch
 
 # avoid importing the whole tensorrt_llm module, which takes time during debugging.
 from importlib.util import find_spec
@@ -19,6 +20,7 @@ from ._utils import CachedCudaEvent, HomoTuple, HostMem, _unwrap, div_up, stream
 
 if "tensorrt_llm" in sys.modules:
     from tensorrt_llm.bindings.internal.batch_manager.kv_cache_manager_v2_utils import (  # noqa # type: ignore
+        BlockIndices,
         DiskAddress,
         DiskToDiskTask,
         DiskToHostTask,
@@ -32,12 +34,16 @@ if "tensorrt_llm" in sys.modules:
         copy_host_to_disk,
         copy_host_to_host,
     )
+    from tensorrt_llm.bindings.internal.batch_manager.kv_cache_manager_v2_utils import (
+    copy_batch_block_offsets as nb_copy_batch_block_offsets,
+)
 else:
     # fast path for dev, avoids importing the whole tensorrt_llm module
     spec = find_spec("kv_cache_manager_v2")
     assert spec is not None and spec.origin is not None
     with DynamicPathManager(str(Path(spec.origin).parent.parent.parent)):
         from bindings.internal.batch_manager.kv_cache_manager_v2_utils import (  # noqa
+            BlockIndices,
             DiskAddress,
             DiskToDiskTask,
             DiskToHostTask,
@@ -51,6 +57,9 @@ else:
             copy_host_to_disk,
             copy_host_to_host,
         )
+        from bindings.internal.batch_manager.kv_cache_manager_v2_utils import (
+    copy_batch_block_offsets as nb_copy_batch_block_offsets,
+)
 
 
 class CopyTask(NamedTuple):
@@ -178,6 +187,22 @@ def get_copier(dst: CacheTier, src: CacheTier) -> Copier | HomoTuple[Copier]:
         ),
     )
     return copiers[dst][src]
+
+
+def copy_batch_block_offsets(
+    dst_tensor: torch.Tensor,
+    batch_size: int,
+    batch_cache_indices: list[tuple[int, int]],
+    num_pools: int,
+    offset: int,
+) -> None:
+    nb_copy_batch_block_offsets(
+        dst_tensor,
+        batch_size,
+        [BlockIndices(addr, length) for addr, length in batch_cache_indices],
+        num_pools,
+        offset,
+    )
 
 
 @dataclass(slots=True)
