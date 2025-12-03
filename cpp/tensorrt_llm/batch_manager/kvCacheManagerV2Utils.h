@@ -17,9 +17,16 @@
 
 #pragma once
 
+#include "tensorrt_llm/kernels/kvCacheIndex.h"
+#include "tensorrt_llm/runtime/iBuffer.h"
+#include "tensorrt_llm/runtime/iTensor.h"
 #include <cstdint>
 #include <cuda.h>
 #include <vector>
+
+namespace tk = tensorrt_llm::kernels;
+using SizeType32 = tensorrt_llm::runtime::SizeType32;
+using ITensor = tensorrt_llm::runtime::ITensor;
 
 namespace tensorrt_llm::batch_manager::kv_cache_manager_v2
 {
@@ -38,6 +45,12 @@ struct Task
     SrcAddr src;
 };
 
+struct BlockIndices
+{
+    MemAddress addr;
+    SizeType32 length;
+};
+
 CUresult copyDiskToDisk(
     std::vector<Task<DiskAddress, DiskAddress>> const& tasks, ssize_t numBytes, CUstream stream) noexcept;
 CUresult copyDiskToHost(
@@ -52,4 +65,8 @@ CUresult copyDeviceToHost(
     std::vector<Task<MemAddress, MemAddress>> const& tasks, ssize_t numBytes, CUstream stream) noexcept;
 CUresult copyDeviceToDevice(
     std::vector<Task<MemAddress, MemAddress>> const& tasks, ssize_t numBytes, CUstream stream) noexcept;
+
+void copyBatchBlockOffsets(ITensor& output, SizeType32 batchSize, std::vector<BlockIndices> const& batchBlockIndices,
+    SizeType32 numPools, SizeType32 offset) noexcept;
+
 } // namespace tensorrt_llm::batch_manager::kv_cache_manager_v2

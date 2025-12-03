@@ -3624,7 +3624,7 @@ class TestGPTOSS(LlmapiAccuracyTestHarness):
         "apply_chat_template": True,
     }
 
-    MODEL_PATH = f"{llm_models_root()}/gpt_oss/gpt-oss-120b"
+    MODEL_PATH = f"openai/gpt-oss-120b"
 
     @pytest.mark.parametrize(
         "kv_cache_dtype",
@@ -3650,7 +3650,8 @@ class TestGPTOSS(LlmapiAccuracyTestHarness):
             cuda_graph_config=CudaGraphConfig() if cuda_graph else None)
 
         kv_cache_config = KvCacheConfig(free_gpu_memory_fraction=0.5,
-                                        dtype=kv_cache_dtype)
+                                        dtype=kv_cache_dtype,
+                                        use_kv_cache_manager_v2=True)
 
         llm = LLM(self.MODEL_PATH,
                   tensor_parallel_size=1,
@@ -3714,7 +3715,8 @@ class TestGPTOSS(LlmapiAccuracyTestHarness):
             cuda_graph_config=CudaGraphConfig() if cuda_graph else None)
 
         kv_cache_config = KvCacheConfig(free_gpu_memory_fraction=0.7,
-                                        dtype=kv_cache_dtype)
+                                        dtype=kv_cache_dtype,
+                                        use_kv_cache_manager_v2=True)
 
         max_seq_len = MAX_INPUT_LEN + MAX_OUTPUT_LEN
         llm = LLM(self.MODEL_PATH,
