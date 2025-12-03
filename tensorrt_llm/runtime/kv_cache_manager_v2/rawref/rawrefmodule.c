@@ -145,7 +145,7 @@ static PyGetSetDef ReferenceType_getsetters[] = {
 
 /* Type definition */
 static PyTypeObject ReferenceTypeType = {
-    PyVarObject_HEAD_INIT(NULL, 0).tp_name = "rawref.ReferenceType",
+    PyVarObject_HEAD_INIT(NULL, 0).tp_name = "_rawref.ReferenceType",
     .tp_doc = "A mutable reference holder that stores an object ID.",
     .tp_basicsize = sizeof(ReferenceTypeObject),
     .tp_itemsize = 0,

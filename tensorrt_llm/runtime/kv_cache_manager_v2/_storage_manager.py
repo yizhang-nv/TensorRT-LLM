@@ -301,7 +301,7 @@ class StorageManager:
                     dbg_rawrefs = [rawref.ref(p) for p in evicted[pg_idx]]
                 evicted[pg_idx].clear()
                 if not NDEBUG:
-                    assert all(p() is None for p in dbg_rawrefs)  # type: ignore[arg-type]
+                    assert all(p() is None for p in dbg_rawrefs)
                 new_free_cnt = storage.get_num_free_slots(pg_idx)
                 # GC of some pages may trigger removal of radix tree blocks and some other pages.
                 assert new_free_cnt >= num_evicted + old_free_cnt

@@ -18,6 +18,23 @@ cd "$RUNTIME_DIR" || exit 1
 
 # Clean previous builds
 echo "Step 1: Cleaning previous builds..."
+
+# First, backup existing source files (hand-written C files and non-mypyc .so files)
+TEMP_C_DIR=$(mktemp -d)
+TEMP_SO_DIR=$(mktemp -d)
+
+echo "  - Backing up existing .c files..."
+find kv_cache_manager_v2 -name "*.c" -type f 2>/dev/null | while read -r cfile; do
+    mkdir -p "$TEMP_C_DIR/$(dirname "$cfile")"
+    cp "$cfile" "$TEMP_C_DIR/$cfile"
+done
+
+echo "  - Backing up existing .so files (e.g., rawref C extension)..."
+find kv_cache_manager_v2 -name "*.so" -type f 2>/dev/null | while read -r sofile; do
+    mkdir -p "$TEMP_SO_DIR/$(dirname "$sofile")"
+    cp "$sofile" "$TEMP_SO_DIR/$sofile"
+done
+
 rm -rf build/
 find kv_cache_manager_v2 -name "*.so" -delete 2>/dev/null
 find kv_cache_manager_v2 -name "*.c" -delete 2>/dev/null
@@ -65,10 +82,30 @@ for excluded_file in _copy_engine.py _exceptions.py; do
     fi
 done
 
+# Restore backed up .c files (hand-written source files like rawrefmodule.c)
+if [ -d "$TEMP_C_DIR/kv_cache_manager_v2" ]; then
+    echo "  - Restoring .c source files..."
+    find "$TEMP_C_DIR/kv_cache_manager_v2" -name "*.c" -type f 2>/dev/null | while read -r cfile; do
+        relative_path="${cfile#$TEMP_C_DIR/}"
+        cp "$cfile" "$relative_path"
+    done
+fi
+
+# Restore backed up .so files (non-mypyc extensions like rawref/_rawref.so)
+if [ -d "$TEMP_SO_DIR/kv_cache_manager_v2" ]; then
+    echo "  - Restoring non-mypyc .so files (e.g., rawref C extension)..."
+    find "$TEMP_SO_DIR/kv_cache_manager_v2" -name "*.so" -type f 2>/dev/null | while read -r sofile; do
+        relative_path="${sofile#$TEMP_SO_DIR/}"
+        cp "$sofile" "$relative_path"
+    done
+fi
+
 echo "  ✓ Restored all hidden files"
 
 # Cleanup
 rm -rf "$TEMP_DIR"
+rm -rf "$TEMP_C_DIR"
+rm -rf "$TEMP_SO_DIR"
 echo ""
 
 # Check results
