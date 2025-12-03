@@ -151,7 +151,7 @@ class KVCacheManager:
         return tuple(tuple(grouping[i]) for i in typed_range(num_life_cycles))
 
     # @TODO: need updating when dynamic resizing is supported.
-    def clamp_max_seq_len_for_mem(self, batch_size: int, model_max_seq_len: int) -> int:
+    def clamp_max_seq_len_for_mem(self, batch_size: int) -> int:
         "Get the max possible sequence length limited by the GPU memory pools."
         assert batch_size > 0
         tokens_per_block = self.tokens_per_block

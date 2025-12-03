@@ -57,6 +57,7 @@ from tensorrt_llm.sampling_params import SamplingParams
 
 from ..flashinfer_utils import IS_FLASHINFER_AVAILABLE
 from ..speculative.spec_tree_manager import SpecTreeManager
+from ..utils import MYPYCLIB_ENABLED
 from .finish_reason import FinishedState
 from .llm_request import LlmRequest, LlmRequestState, get_draft_token_length
 from .resource_manager import ResourceManager, ResourceManagerType
@@ -249,7 +250,31 @@ def _unwrap_singleton(p: Optional[list[T]]) -> Optional[T]:
     return t
 
 
+def _get_beam_width_in(request: LlmRequest) -> int:
+    return (
+        1
+        if request.is_context_init_state
+        else request.get_beam_width_by_iter(for_next_iteration=False)
+    )
+
+
+def _get_beam_width_out(request: LlmRequest) -> int:
+    return request.get_beam_width_by_iter(for_next_iteration=True)
+
+
+def _get_max_beam_width(request: LlmRequest) -> int:
+    sampling_config = request.sampling_config
+    max_beam_width = sampling_config.beam_width
+    if sampling_config.beam_width_array is not None:
+        max_beam_width = max(max_beam_width, sampling_config.beam_width_array.max())
+    return max_beam_width
+
+
 def _request_get_sampling_params(request: LlmRequest) -> UtilsSamplingParams:
+    if MYPYCLIB_ENABLED:
+        import mypyclib
+
+        return mypyclib._request_get_sampling_params_impl(request)
     sampling_config = request.sampling_config
     temperature = _unwrap_singleton(cast(Optional[list[float]], sampling_config.temperature))
     top_p = _unwrap_singleton(cast(Optional[list[float]], sampling_config.top_p))
@@ -263,6 +288,10 @@ def _request_get_sampling_params(request: LlmRequest) -> UtilsSamplingParams:
 
 
 def _request_strategy(request: LlmRequest, *, vocab_size: int) -> Strategy:
+    if MYPYCLIB_ENABLED:
+        import mypyclib
+
+        return mypyclib._request_strategy_impl(request, vocab_size=vocab_size)
     params = _request_get_sampling_params(request)
     return resolve_sampling_strategy(params, vocab_size=vocab_size)
 
@@ -274,6 +303,13 @@ def _group_requests_by_strategy_key(
     pin_memory: bool = False,
     vocab_size: int,
 ) -> dict[tuple[GenericStrategyKeyType, bool], tuple[torch.Tensor, List[Strategy]]]:
+    if MYPYCLIB_ENABLED:
+        import mypyclib
+
+        return mypyclib._group_requests_by_strategy_key_impl(
+            requests, strategy_to_key=strategy_to_key, pin_memory=pin_memory, vocab_size=vocab_size
+        )
+
     # NB: Client code relies on request indices in returned torch.Tensor being sorted.
     group_dict: dict[tuple[GenericStrategyKeyType, bool], tuple[list[int], list[Strategy]]] = (
         defaultdict(lambda: ([], []))
@@ -1033,6 +1069,10 @@ class TorchSampler(Sampler):
     def _speculation_could_use_rejection_sampling(
         request: LlmRequest, strategy: Optional[Strategy] = None
     ) -> bool:
+        if MYPYCLIB_ENABLED:
+            import mypyclib
+
+            return mypyclib._speculation_could_use_rejection_sampling_impl(request, strategy)
         if strategy is None:
             strategy = _request_strategy(
                 request,
@@ -1205,6 +1245,11 @@ class TorchSampler(Sampler):
 
         Modifies logits in-place.
         """
+        if MYPYCLIB_ENABLED:
+            import mypyclib
+
+            return mypyclib._apply_embedding_bias_impl(logits, requests, request_steps)
+
         # NB: Unfortunately, Torch provides no combination of torch.index_select (similar to
         #     torch.Tensor.gather -- allows one-to-many mapping) and addition, analogous to how
         #     torch.Tensor.scatter_add_ (and it's variant torch.Tensor.index_add_ -- allows

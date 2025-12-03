@@ -32,6 +32,7 @@ if sys.version_info[:2] >= (3, 12):
 else:
     from typing_extensions import override
 
+from ..utils import MYPYCLIB_ENABLED
 
 TemperatureOnly: TypeAlias = tuple[Literal["temperature"], float]
 TopK: TypeAlias = tuple[Literal["top_k"], int, float]
@@ -53,6 +54,11 @@ class UtilsSamplingParams:
 
 def resolve_sampling_strategy(params: UtilsSamplingParams, *, vocab_size: int) -> Strategy:
     # The semantics are specified in the doc-string of SamplingParams
+
+    if MYPYCLIB_ENABLED:
+        import mypyclib
+
+        return mypyclib.resolve_sampling_strategy_impl(params, vocab_size=vocab_size)
 
     temperature = params.temperature
     top_p = params.top_p

@@ -1,11 +1,15 @@
 #include "tensorrt_llm/batch_manager/kvCacheManagerV2Utils.h"
 #include "tensorrt_llm/common/logger.h"
+#include "tensorrt_llm/common/memoryUtils.h"
 #include <cassert>
 #include <cstdio>
 #include <cuda.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <vector>
+
+namespace tc = tensorrt_llm::common;
+using namespace tensorrt_llm::runtime;
 
 namespace tensorrt_llm::batch_manager::kv_cache_manager_v2
 {
@@ -140,6 +144,32 @@ CUresult copyHostToHost(
 {
     auto const data = new UserData<MemAddress, MemAddress>{std::move(tasks), numBytes};
     return cuLaunchHostFunc(stream, hostFnHostToHostCopy, data);
+}
+
+void copyBatchBlockOffsets(ITensor& output, SizeType32 batchSize, std::vector<BlockIndices> const& batchBlockIndices,
+    SizeType32 numPools, SizeType32 offset) noexcept
+{
+    auto* dstPtr = bufferCast<tk::KVCacheIndex::UnderlyingType>(output);
+    auto const& dstShape = output.getShape();
+
+    for (SizeType32 poolIdx = 0; poolIdx < numPools; poolIdx++)
+    {
+        for (SizeType32 batchIdx = 0; batchIdx < batchSize; batchIdx++)
+        {
+            auto const& blockIndices = batchBlockIndices[poolIdx * batchSize + batchIdx];
+            auto const addr = reinterpret_cast<tk::KVCacheIndex::UnderlyingType*>(blockIndices.addr);
+            auto const length = blockIndices.length;
+            auto const dstIndexK = tc::flat_index(dstShape.d, poolIdx, batchIdx + offset, 0, 0);
+            auto const dstIndexV = tc::flat_index(dstShape.d, poolIdx, batchIdx + offset, 1, 0);
+            auto addrK = dstPtr + dstIndexK;
+            auto addrV = dstPtr + dstIndexV;
+            for (SizeType32 i = 0; i < length; i++)
+            {
+                addrK[i] = addr[i];
+                addrV[i] = addr[i] + 1;
+            }
+        }
+    }
 }
 
 } // namespace tensorrt_llm::batch_manager::kv_cache_manager_v2
