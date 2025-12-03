@@ -52,8 +52,7 @@ from ._utils import (
 
 
 class CacheLevelManager:
-    __slots__ = ("parent", "cache_level", "storage", "controller")
-    parent: weakref.ref["StorageManager"]
+    __slots__ = ("cache_level", "storage", "controller")
     cache_level: CacheLevel
     storage: CacheLevelStorage
     controller: PerLevelEvictionController
@@ -64,16 +63,15 @@ class CacheLevelManager:
 
     def __init__(
         self,
-        parent: "StorageManager",
+        life_cycle_grouping: TypedIndexList[LifeCycleId, PoolGroupIndex],
         cache_level: CacheLevel,
         config: CacheTierConfig,
         slot_size_lists: Sequence[Sequence[int]],
         init_ratio: Sequence[float],
     ):
-        self.parent = weakref.ref(parent)
         self.cache_level = cache_level
         self.storage = self._create_cache_level_storage(config, slot_size_lists, init_ratio)
-        self.controller = PerLevelEvictionController(parent._life_cycle_grouping, cache_level)
+        self.controller = PerLevelEvictionController(life_cycle_grouping, cache_level)
 
     @property
     def num_pool_groups(self) -> PoolGroupIndex:
@@ -158,7 +156,9 @@ class StorageManager:
         self._levels = cast(
             TypedIndexList,
             [
-                CacheLevelManager(self, i, config.cache_tiers[i], slot_size_lists, init_ratio)
+                CacheLevelManager(
+                    self._life_cycle_grouping, i, config.cache_tiers[i], slot_size_lists, init_ratio
+                )
                 for i in typed_range(num_levels)
             ],
         )

@@ -338,7 +338,7 @@ class LockOwner(NamedTuple):
     life_cycle: LifeCycleId
 
 
-@dataclass(slots=True, init=False, weakref_slot=True)
+@dataclass(slots=True, init=False)
 class _SharedPageLock:
     _uniq_lock: _UniqPageLock | None
     _user: LockOwner
