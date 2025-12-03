@@ -6,14 +6,11 @@ from collections import OrderedDict, defaultdict, deque
 from typing import (TYPE_CHECKING, Dict, Iterable, List, Optional, Set, Tuple,
                     Union)
 
-import numba
 import numpy as np
 import torch
 
 import tensorrt_llm
 import tensorrt_llm.bindings
-from mypyclib import \
-    copy_batch_block_offsets as copy_batch_block_offsets_mypyclib
 from tensorrt_llm._utils import (TensorWrapper, convert_to_torch_tensor,
                                  get_size_in_bytes, mpi_disabled)
 from tensorrt_llm.bindings.BuildInfo import ENABLE_MULTI_DEVICE
@@ -33,12 +30,14 @@ from tensorrt_llm.runtime.kv_cache_manager_v2 import \
     KVCacheManagerConfig as KVCacheManagerConfigPy
 from tensorrt_llm.runtime.kv_cache_manager_v2 import LayerId, _KVCache
 from tensorrt_llm.runtime.kv_cache_manager_v2._config import DataRole
+from tensorrt_llm.runtime.kv_cache_manager_v2._copy_engine import \
+    copy_batch_block_offsets as copy_batch_block_offsets_nanobind
 from tensorrt_llm.runtime.kv_cache_manager_v2._utils import (exact_div,
                                                              typed_range)
 from tensorrt_llm.sampling_params import SamplingParams
 
 from ..._utils import (binding_to_str_dtype, get_size_in_bytes, mpi_rank,
-                       nvtx_mark, nvtx_range)
+                       nvtx_range)
 from ...logger import logger
 from ...mapping import CpType, Mapping
 from .kv_cache_connector import KvCacheConnectorManager
@@ -1594,9 +1593,7 @@ class KVCacheManagerV2(BaseResourceManager):
                             torch.cuda.current_stream().cuda_stream)
                         assert success
 
-                        nvtx_mark("set_capacity")
                         kv_cache.capacity = req.prompt_len
-                        nvtx_mark("set_capacity_end")
 
                         if self.kv_connector_manager is not None:
                             block_ids = self.get_cache_indices(req)
@@ -1605,9 +1602,7 @@ class KVCacheManagerV2(BaseResourceManager):
 
             for req in generation_batch:
                 kv_cache = self.kv_cache_map[req.py_request_id]
-                nvtx_mark("update_capacity")
                 kv_cache.capacity += 1
-                nvtx_mark("update_capacity_end")
 
         if self.kv_connector_manager is not None:
             self.kv_connector_manager.build_scheduler_output(
@@ -1899,33 +1894,13 @@ class KVCacheManagerV2(BaseResourceManager):
         for pool_idx in range(self.num_pools):
             for req_id in request_ids:
                 batch_cache_indices.append(
-                    np.asarray(
-                        self.kv_cache_map[req_id].get_page_indices(pool_idx)))
+                    self.kv_cache_map[req_id].get_page_indices(
+                        pool_idx).buffer_info())
 
         if len(batch_cache_indices) > 0:
-            nvtx_mark("copy_batch_block_offsets_start")
-            copy_batch_block_offsets_mypyclib(dst_tensor.numpy(),
-                                              len(request_ids),
+            copy_batch_block_offsets_nanobind(dst_tensor, len(request_ids),
                                               batch_cache_indices,
                                               self.num_pools, offset)
-            nvtx_mark("copy_batch_block_offsets_end")
-            # copy_batch_block_offsets_numba(dst_tensor.numpy(), len(request_ids),
-            #                                batch_cache_indices, self.num_pools,
-            #                                offset)
-
-
-@numba.jit(nopython=True)
-def copy_batch_block_offsets_numba(dst_tensor: np.ndarray, batch_size: int,
-                                   batch_cache_indices: List[np.ndarray],
-                                   num_pools: int, offset: int):
-    for pool_idx in range(num_pools):
-        for idx in range(batch_size):
-            batch_idx = pool_idx * batch_size + idx
-            batch_cache_index = batch_cache_indices[batch_idx]
-            dst_tensor[pool_idx, idx + offset,
-                       0, :len(batch_cache_index)] = batch_cache_index
-            dst_tensor[pool_idx, idx + offset,
-                       1, :len(batch_cache_index)] = batch_cache_index + 1
 
 
 class SlotManager:

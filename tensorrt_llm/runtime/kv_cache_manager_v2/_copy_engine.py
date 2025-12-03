@@ -4,9 +4,10 @@ from dataclasses import dataclass
 from typing import ClassVar, NamedTuple, Sequence
 
 import cuda.bindings.driver as drv
+import torch
 
-# avoid importing the whole tensorrt_llm module, which takes time during debugging.
-from tensorrt_llm.binding.internal.batch_manager.kv_cache_manager_v2_utils import (
+from tensorrt_llm.bindings.internal.batch_manager.kv_cache_manager_v2_utils import (
+    BlockIndices,
     DiskAddress,
     DiskToDiskTask,
     DiskToHostTask,
@@ -19,6 +20,9 @@ from tensorrt_llm.binding.internal.batch_manager.kv_cache_manager_v2_utils impor
     copy_host_to_device,
     copy_host_to_disk,
     copy_host_to_host,
+)
+from tensorrt_llm.bindings.internal.batch_manager.kv_cache_manager_v2_utils import (
+    copy_batch_block_offsets as nb_copy_batch_block_offsets,
 )
 
 from ._common import Address, CacheTier, CudaStream, MemAddress
@@ -149,6 +153,22 @@ def get_copier(dst: CacheTier, src: CacheTier) -> Copier | HomoTuple[Copier]:
     return copiers[dst][src]
 
 
+def copy_batch_block_offsets(
+    dst_tensor: torch.Tensor,
+    batch_size: int,
+    batch_cache_indices: list[tuple[int, int]],
+    num_pools: int,
+    offset: int,
+) -> None:
+    nb_copy_batch_block_offsets(
+        dst_tensor,
+        batch_size,
+        [BlockIndices(addr, length) for addr, length in batch_cache_indices],
+        num_pools,
+        offset,
+    )
+
+
 class StagingBufferManager:
     __slots__ = ("mutex", "buffer", "grains", "next")
     GRANULARITY: ClassVar[int] = 1 << 20
@@ -184,6 +204,7 @@ class StagingBufferManager:
         return len(self.grains)
 
     def _suggest_next_max_size_unsafe(self) -> int:
+        "Requesting more than this may degrade performance. Must be called with self.mutex held."
         "Requesting more than this may degrade performance. Must be called with self.mutex held."
         return self.GRANULARITY * (self.num_grains - self.next)
 

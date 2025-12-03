@@ -8,6 +8,7 @@ from typing import Dict, List
 import torch
 
 from tensorrt_llm._utils import TensorWrapper, convert_to_torch_tensor
+from tensorrt_llm.logger import logger
 from tensorrt_llm.mapping import Mapping
 from tensorrt_llm.math_utils import ceil_div, pad_up
 from tensorrt_llm.quantization.utils import fp4_utils
@@ -30,6 +31,13 @@ EventType = Enum(
     ['Main', *aux_stream_name_list],
     start=0,
 )
+
+MYPYCLIB_ENABLED = os.getenv("TRTLLM_ENABLE_MYPYCLIB", "0") == "1"
+
+if MYPYCLIB_ENABLED:
+    logger.info("mypyclib is enabled")
+else:
+    logger.info("mypyclib is disabled")
 
 
 # IMPORTANT: Keep the same order of activation functions in this enum and the enum in
