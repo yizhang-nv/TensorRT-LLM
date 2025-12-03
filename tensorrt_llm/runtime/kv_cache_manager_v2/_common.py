@@ -1,9 +1,9 @@
 import enum
 import os
 from dataclasses import dataclass
-from typing import NewType
+from typing import Final, NewType
 
-NDEBUG = int(os.environ.get("TLLM_KV_CACHE_MANAGER_V2_DEBUG", "0")) == 0
+NDEBUG: Final[int] = int(os.environ.get("TLLM_KV_CACHE_MANAGER_V2_DEBUG", "0")) == 0
 
 
 class PageStatus(enum.IntEnum):
@@ -21,7 +21,7 @@ class CacheTier(enum.IntEnum):
 
 CacheLevel = NewType("CacheLevel", int)
 
-GPU_LEVEL = CacheLevel(0)
+GPU_LEVEL: Final[CacheLevel] = CacheLevel(0)
 
 # Normal token id that falls in the tokenizer vocabulary.
 TokenId = NewType("TokenId", int)
@@ -48,10 +48,10 @@ MemAddress = NewType("MemAddress", int)
 
 FileDescriptor = NewType("FileDescriptor", int)
 
-BAD_FILE_DESCRIPTOR = FileDescriptor(-1)
+BAD_FILE_DESCRIPTOR: Final[FileDescriptor] = FileDescriptor(-1)
 
 PageIndex = NewType("PageIndex", int)
-BAD_PAGE_INDEX = PageIndex(-1)
+BAD_PAGE_INDEX: Final[PageIndex] = PageIndex(-1)
 
 
 @dataclass(slots=True, frozen=True)
@@ -65,6 +65,6 @@ Address = MemAddress | DiskAddress
 SlidingWindowSize = int | None
 
 Priority = NewType("Priority", int)
-PRIORITY_MIN = Priority(0)
-PRIORITY_MAX = Priority(100)
-PRIORITY_DEFAULT = Priority(35)
+PRIORITY_MIN: Final[Priority] = Priority(0)
+PRIORITY_MAX: Final[Priority] = Priority(100)
+PRIORITY_DEFAULT: Final[Priority] = Priority(35)

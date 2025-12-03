@@ -2,7 +2,7 @@ import contextlib
 import ctypes
 from collections.abc import Sequence
 from functools import lru_cache
-from typing import Iterator
+from typing import Final, Iterator
 
 import cuda.bindings.driver as drv
 from cuda.core.experimental import Kernel, Program, ProgramOptions
@@ -10,7 +10,7 @@ from cuda.core.experimental._module import ObjectCode
 from kv_cache_manager_v2._common import CudaStream, LayerId, MemAddress, TokenIdExt
 from kv_cache_manager_v2._utils import _unwrap, div_up, exact_div
 
-_SLEEP_TIME_NS = 0
+_SLEEP_TIME_NS: Final[int] = 0
 
 
 @contextlib.contextmanager

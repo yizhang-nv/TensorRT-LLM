@@ -18,6 +18,7 @@ from typing import (
     Any,
     Callable,
     ClassVar,
+    Final,
     Generic,
     Iterable,
     Iterator,
@@ -317,7 +318,7 @@ def find_index(seq: Iterable[T], predicate: Callable[[T], bool]) -> int:
     return i + 1
 
 
-mem_alignment = 2 << 20  # 2MB
+mem_alignment: Final[int] = 2 << 20  # 2MB
 
 _libc = ctypes.CDLL(find_library("c"))
 _libc.aligned_alloc.restype = ctypes.c_void_p
@@ -355,7 +356,7 @@ def _madvise(ptr: int, size: int, advice: int) -> None:
         raise HostOOMError(error_msg)
 
 
-MADV_HUGEPAGE = 14
+MADV_HUGEPAGE: Final[int] = 14
 
 
 def _realloc(ptr: int, size: int) -> int:
