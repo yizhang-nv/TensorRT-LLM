@@ -31,8 +31,7 @@ class EvictablePage(Protocol):
     @property
     def status(self) -> PageStatus: ...
 
-    @staticmethod
-    def is_committed() -> bool: ...
+    def is_committed(self) -> bool: ...
 
     node_ref: "NodeRef | None"
 

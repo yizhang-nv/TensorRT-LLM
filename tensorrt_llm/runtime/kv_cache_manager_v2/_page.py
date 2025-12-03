@@ -37,17 +37,19 @@ from ._utils import (
     unwrap_rawref,
 )
 
+ReferenceType = rawref.ReferenceType
+
 
 # We will have a huge amount of pages for large storage capacity.
 # So we prefer inheritance over composition to save some memory.
 @dataclass(slots=True)
 class Page(Slot):
-    _manager: rawref.ref["StorageManager"]
+    _manager: ReferenceType["StorageManager"]
     life_cycle: LifeCycleId
     cache_level: CacheLevel
     _priority: Priority
     # _holder is either None or a valid rawref.
-    _holder: rawref.ref["_PageHolder"] | None
+    _holder: ReferenceType["_PageHolder"] | None
     node_ref: NodeRef | None
 
     def __del__(self) -> None:
@@ -102,8 +104,7 @@ class Page(Slot):
     def scheduled_for_eviction(self) -> bool:
         return self.node_ref is not None
 
-    @staticmethod
-    def is_committed() -> bool:
+    def is_committed(self) -> bool:
         raise LogicError("Unexpected call to this implementation.")
 
 
@@ -116,8 +117,7 @@ class UncommittedPage(Page):
 
     tokens: list[TokenIdExt] = field(default_factory=list)
 
-    @staticmethod
-    def is_committed() -> bool:
+    def is_committed(self) -> bool:
         return False
 
     def __init__(
@@ -187,8 +187,7 @@ class CommittedPage(Page):
     block: rawref.ref["Block"]
     __rawref__: rawref.ref["CommittedPage"]
 
-    @staticmethod
-    def is_committed() -> bool:
+    def is_committed(self) -> bool:
         return True
 
     def __init__(
@@ -245,19 +244,19 @@ class _PageHolder:
         self.__rawref__.invalidate()
         if not NDEBUG:
             assert_critical(self._lock is None)
-        self.page._holder = None
+        page = self.page
+        page._holder = None
         # If a held page was in last level cache, it was not scheduled for eviction.
-        if self.page.is_committed():
-            page = cast(CommittedPage, self.page)
+        if page.is_committed():
+            page = cast(CommittedPage, page)
             if not page.scheduled_for_eviction:
                 page.manager.schedule_for_eviction(page)
             block = page.block()
             if block is None or block.is_orphan:
                 page.manager.exclude_from_eviction(page)
-        elif self.page.scheduled_for_eviction:
-            assert isinstance(self.page, UncommittedPage)
-            # page = cast(UncommittedPage, self.page)
-            self.page.manager.exclude_from_eviction(self.page)
+        elif page.scheduled_for_eviction:
+            page = cast(UncommittedPage, self.page)
+            page.manager.exclude_from_eviction(self.page)
 
     # Prevent eviction. You need to migrate the page to GPU later.
     def lock(
