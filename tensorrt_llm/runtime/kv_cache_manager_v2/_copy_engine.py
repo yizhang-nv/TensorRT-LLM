@@ -21,10 +21,7 @@ if spec is None:
 
 assert spec is not None and spec.origin is not None
 sys.path.append(str(Path(spec.origin).parent.parent.parent))
-import bindings.internal.batch_manager.kv_cache_manager_v2_utils as nb_utils  # noqa: F401, E402
-
-sys.path.pop()
-from nb_utils import (  # noqa: E402
+from bindings.internal.batch_manager.kv_cache_manager_v2_utils import (  # noqa: F401, E402
     DiskAddress,
     DiskToDiskTask,
     DiskToHostTask,
@@ -38,6 +35,8 @@ from nb_utils import (  # noqa: E402
     copy_host_to_disk,
     copy_host_to_host,
 )
+
+sys.path.pop()
 
 
 class CopyTask(NamedTuple):

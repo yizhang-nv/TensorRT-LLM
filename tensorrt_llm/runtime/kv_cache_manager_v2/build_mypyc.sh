@@ -2,10 +2,31 @@
 
 # Build script for compiling kv_cache_manager_v2 with mypyc
 # Run this script from the kv_cache_manager_v2 directory or from the project root
+#
+# Usage:
+#   ./build_mypyc.sh         Build the module
+#   ./build_mypyc.sh clean   Clean mypyc-generated files (for debugging with .py files)
 
 # Determine script directory and runtime directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUNTIME_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# Change to runtime directory
+cd "$RUNTIME_DIR" || exit 1
+
+# Clean function
+do_clean() {
+    echo "Cleaning mypyc-generated files..."
+    rm -rf build/
+    find kv_cache_manager_v2 -name "*.so" -type f ! -path "*/rawref/*" -print -delete 2>/dev/null
+    echo "✓ Cleaned. You can now run the original .py files for debugging."
+}
+
+# Handle clean option
+if [ "$1" = "clean" ]; then
+    do_clean
+    exit 0
+fi
 
 echo "========================================"
 echo "Building kv_cache_manager_v2 with mypyc"
@@ -13,93 +34,20 @@ echo "========================================"
 echo "Runtime directory: $RUNTIME_DIR"
 echo ""
 
-# Change to runtime directory for compilation (to make module standalone)
-cd "$RUNTIME_DIR" || exit 1
-
-# Clean previous builds
-echo "Step 1: Cleaning previous builds..."
-
-# First, backup existing source files (hand-written C files and non-mypyc .so files)
-TEMP_C_DIR=$(mktemp -d)
-TEMP_SO_DIR=$(mktemp -d)
-
-echo "  - Backing up existing .c files..."
-find kv_cache_manager_v2 -name "*.c" -type f 2>/dev/null | while read -r cfile; do
-    mkdir -p "$TEMP_C_DIR/$(dirname "$cfile")"
-    cp "$cfile" "$TEMP_C_DIR/$cfile"
-done
-
-echo "  - Backing up existing .so files (e.g., rawref C extension)..."
-find kv_cache_manager_v2 -name "*.so" -type f 2>/dev/null | while read -r sofile; do
-    mkdir -p "$TEMP_SO_DIR/$(dirname "$sofile")"
-    cp "$sofile" "$TEMP_SO_DIR/$sofile"
-done
-
-rm -rf build/
-find kv_cache_manager_v2 -name "*.so" -delete 2>/dev/null
-find kv_cache_manager_v2 -name "*.c" -delete 2>/dev/null
-echo "  ✓ Cleaned"
-echo ""
-
-# Hide only the files that won't be compiled (to avoid import errors during type checking)
-echo "Step 2: Hiding excluded files temporarily..."
-TEMP_DIR=$(mktemp -d)
-mkdir -p "$TEMP_DIR/kv_cache_manager_v2"
-EXCLUDED_KV_FILES=(
-)
-HIDDEN_COUNT=0
-for excluded_file in "${EXCLUDED_KV_FILES[@]}"; do
-    if [ -f "$excluded_file" ]; then
-        mv "$excluded_file" "$TEMP_DIR/$excluded_file" && ((HIDDEN_COUNT++))
-    fi
-done
-
-echo "  ✓ Temporarily hid $HIDDEN_COUNT files from compilation"
-echo "  ℹ Note: No files are excluded from compilation"
+# Clean previous mypyc builds (exclude rawref/ which has hand-written C extension)
+echo "Step 1: Cleaning previous mypyc builds..."
+do_clean
 echo ""
 
 # Build with mypyc
-echo "Step 3: Compiling with mypyc..."
+echo "Step 2: Compiling with mypyc..."
 echo ""
 
-# Run compilation from the runtime directory
 python "$SCRIPT_DIR/setup_mypyc.py" build_ext --inplace 2>&1 | \
     tee /tmp/mypyc_build_full.log | \
     grep -E "(^Compiling |^running |^building |^gcc|^clang)" || true
 
 BUILD_EXIT_CODE=${PIPESTATUS[0]}
-echo ""
-
-# Restore all hidden files
-echo "Step 4: Restoring hidden files..."
-
-# Restore excluded kv_cache_manager_v2 files
-# (None)
-
-# Restore backed up .c files (hand-written source files like rawrefmodule.c)
-if [ -d "$TEMP_C_DIR/kv_cache_manager_v2" ]; then
-    echo "  - Restoring .c source files..."
-    find "$TEMP_C_DIR/kv_cache_manager_v2" -name "*.c" -type f 2>/dev/null | while read -r cfile; do
-        relative_path="${cfile#$TEMP_C_DIR/}"
-        cp "$cfile" "$relative_path"
-    done
-fi
-
-# Restore backed up .so files (non-mypyc extensions like rawref/_rawref.so)
-if [ -d "$TEMP_SO_DIR/kv_cache_manager_v2" ]; then
-    echo "  - Restoring non-mypyc .so files (e.g., rawref C extension)..."
-    find "$TEMP_SO_DIR/kv_cache_manager_v2" -name "*.so" -type f 2>/dev/null | while read -r sofile; do
-        relative_path="${sofile#$TEMP_SO_DIR/}"
-        cp "$sofile" "$relative_path"
-    done
-fi
-
-echo "  ✓ Restored all hidden files"
-
-# Cleanup
-rm -rf "$TEMP_DIR"
-rm -rf "$TEMP_C_DIR"
-rm -rf "$TEMP_SO_DIR"
 echo ""
 
 # Check results

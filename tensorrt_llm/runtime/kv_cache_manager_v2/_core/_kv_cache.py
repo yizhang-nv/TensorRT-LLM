@@ -256,8 +256,8 @@ class _KVCache:
         self._status = self.Status.CLOSED
 
     def __del__(self) -> None:
-        self.__rawref__.invalidate()
         self.close()
+        self.__rawref__.invalidate()
 
     @property
     def beam_width(self) -> BeamIndex:

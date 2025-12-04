@@ -274,7 +274,6 @@ class Block:
         prev.next[self.key] = self
 
     def __del__(self) -> None:
-        self.__rawref__.invalidate()
         for ref in self.storage:
             if ref is not None and ref() is not None:
                 page = unwrap_rawref(ref)
@@ -283,6 +282,7 @@ class Block:
                         page.manager.exclude_from_eviction(page)
         if self._prev() is not None and isinstance(self.prev, RootBlock) and not self.prev.next:
             self.prev.prev.next.pop(self.prev.key)
+        self.__rawref__.invalidate()
 
     def _partial_match_this_node(self, tokens: TokenBlock) -> int:
         """

@@ -215,7 +215,6 @@ class CommittedPage(Page):
         self.set_slot(slot)
 
     def __del__(self) -> None:
-        self.__rawref__.invalidate()
         block = self.block()
         # block may be None when rebase happens, i.e. another block with the same key is committed,
         # replacing it, but the page is still used by a _KVCache.
@@ -225,6 +224,7 @@ class CommittedPage(Page):
                 self.manager._life_cycles.get_life_cycle(self.life_cycle),
             )
         Page.__del__(self)
+        self.__rawref__.invalidate()
 
 
 @dataclass(slots=True)
@@ -241,7 +241,6 @@ class _PageHolder:
         self.__rawref__ = rawref.NULL
 
     def __del__(self) -> None:
-        self.__rawref__.invalidate()
         if not NDEBUG:
             assert_critical(self._lock is None)
         page = self.page
@@ -257,6 +256,7 @@ class _PageHolder:
         elif page.scheduled_for_eviction:
             page = cast(UncommittedPage, self.page)
             page.manager.exclude_from_eviction(self.page)
+        self.__rawref__.invalidate()
 
     # Prevent eviction. You need to migrate the page to GPU later.
     def lock(
@@ -311,7 +311,6 @@ class _UniqPageLock:
         return self.holder.page
 
     def __del__(self) -> None:
-        self.__rawref__.invalidate()
         page = self.page
         if not NDEBUG:
             assert_critical(page.cache_level == CacheLevel(0) and not page.scheduled_for_eviction)
@@ -330,6 +329,7 @@ class _UniqPageLock:
             # for eviction as usual.
             if page.status != PageStatus.DROPPABLE and page.manager.is_evictable(page):
                 page.manager.schedule_for_eviction(page)
+        self.__rawref__.invalidate()
 
 
 class LockOwner(NamedTuple):
