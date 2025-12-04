@@ -1,15 +1,30 @@
-import os
 import sys
 import threading
+from _thread import LockType
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
-from typing import ClassVar, NamedTuple, Sequence
+
+# avoid importing the whole tensorrt_llm module, which takes time during debugging.
+from importlib.util import find_spec
+from pathlib import Path
+from typing import ClassVar, NamedTuple, Sequence, cast
 
 import cuda.bindings.driver as drv
 
-# avoid importing the whole tensorrt_llm module, which takes time during debugging.
-sys.path.append(os.path.abspath(os.path.join(__file__, "../../..")))
-from bindings.internal.batch_manager.kv_cache_manager_v2_utils import (
+from ._common import Address, CacheTier, CudaStream, MemAddress
+from ._utils import CachedCudaEvent, HomoTuple, HostMem, _unwrap, div_up, stream_wait_events
+
+spec = find_spec("kv_cache_manager_v2._copy_engine")
+if spec is None:
+    spec = find_spec("tensorrt_llm.runtime.kv_cache_manager_v2._copy_engine")
+# fast path for dev, avoids importing the whole tensorrt_llm module
+
+assert spec is not None and spec.origin is not None
+sys.path.append(str(Path(spec.origin).parent.parent.parent))
+import bindings.internal.batch_manager.kv_cache_manager_v2_utils as nb_utils  # noqa: F401, E402
+
+sys.path.pop()
+from nb_utils import (  # noqa: E402
     DiskAddress,
     DiskToDiskTask,
     DiskToHostTask,
@@ -23,11 +38,6 @@ from bindings.internal.batch_manager.kv_cache_manager_v2_utils import (
     copy_host_to_disk,
     copy_host_to_host,
 )
-
-sys.path.pop()
-
-from ._common import Address, CacheTier, CudaStream, MemAddress
-from ._utils import CachedCudaEvent, HomoTuple, HostMem, _unwrap, div_up, stream_wait_events
 
 
 class CopyTask(NamedTuple):
@@ -58,14 +68,14 @@ def _copy_disk_to_disk(tasks: Sequence[CopyTask], num_bytes: int, stream: CudaSt
                 [
                     DiskToDiskTask(
                         DiskAddress(
-                            dst.fd,  # type: ignore[attr-defined]
-                            dst.pos,  # type: ignore[attr-defined]
-                        ),  # type: ignore[attr-defined]
-                        DiskAddress(
-                            src.fd,  # type: ignore[attr-defined]
-                            src.pos,  # type: ignore[attr-defined]
+                            cast(DiskAddress, dst).fd,
+                            cast(DiskAddress, dst).pos,
                         ),
-                    )  # type: ignore[attr-defined]
+                        DiskAddress(
+                            cast(DiskAddress, src).fd,
+                            cast(DiskAddress, src).pos,
+                        ),
+                    )
                     for dst, src in tasks
                 ],
                 num_bytes,
@@ -96,7 +106,10 @@ def _copy_disk_to_host(tasks: Sequence[CopyTask], num_bytes: int, stream: CudaSt
         drv.CUresult(
             copy_disk_to_host(
                 [
-                    DiskToHostTask(dst, DiskAddress(src.fd, src.pos))  # type: ignore[attr-defined]
+                    DiskToHostTask(
+                        cast(MemAddress, dst),
+                        DiskAddress(cast(DiskAddress, src).fd, cast(DiskAddress, src).pos),
+                    )
                     for dst, src in tasks
                 ],
                 num_bytes,
@@ -113,10 +126,10 @@ def _copy_host_to_disk(tasks: Sequence[CopyTask], num_bytes: int, stream: CudaSt
                 [
                     HostToDiskTask(
                         DiskAddress(
-                            dst.fd,  # type: ignore[attr-defined]
-                            dst.pos,
-                        ),  # type: ignore[attr-defined]
-                        src,
+                            cast(DiskAddress, dst).fd,
+                            cast(DiskAddress, dst).pos,
+                        ),
+                        cast(MemAddress, src),
                     )
                     for dst, src in tasks
                 ],
@@ -154,16 +167,78 @@ def get_copier(dst: CacheTier, src: CacheTier) -> Copier | HomoTuple[Copier]:
     return copiers[dst][src]
 
 
+@dataclass(slots=True)
+class GrainMetadata:
+    mutex: LockType
+    ready_event: CachedCudaEvent  # protects the buffer grain.
+
+
+class StagingBuffer:
+    __slots__ = ("manager", "min_size", "max_size", "_size", "start_grain", "stream")
+    manager: "StagingBufferManager"
+    min_size: int
+    max_size: int
+    _size: int
+    start_grain: int
+    stream: CudaStream
+
+    def __init__(
+        self, manager: "StagingBufferManager", min_size: int, max_size: int, stream: CudaStream
+    ):
+        self.manager = manager
+        self.min_size = min_size
+        self.max_size = max_size
+        self.stream = stream
+
+    @property
+    def address(self) -> MemAddress:
+        return MemAddress(self.manager.buffer.address + self.start_grain * self.manager.GRANULARITY)
+
+    @property
+    def size(self) -> int:
+        return self._size
+
+    @property
+    def num_grains(self) -> int:
+        return div_up(self._size, self.manager.GRANULARITY)
+
+    @property
+    def grains(self) -> list[GrainMetadata]:
+        return self.manager.grains[self.start_grain : self.start_grain + self.num_grains]
+
+    def __enter__(self) -> "StagingBuffer":
+        manager = self.manager
+        if self.min_size > manager.size:
+            raise ValueError(f"Requested min_size {self.min_size} is too large for the manager")
+        with manager.mutex:
+            self._size = min(self.max_size, manager._suggest_next_max_size_unsafe())
+            self.start_grain = manager.next
+            manager.next += self.num_grains
+            assert manager.next <= manager.num_grains
+            if manager.next == manager.num_grains:
+                manager.next = 0
+
+            def lock_and_consume_events() -> Iterator[CachedCudaEvent]:
+                for grain in self.grains:
+                    grain.mutex.acquire()
+                    yield grain.ready_event
+                    grain.ready_event = CachedCudaEvent.NULL
+
+            stream_wait_events(self.stream, lock_and_consume_events())
+            return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        event = CachedCudaEvent(self.stream)
+        for grain in reversed(self.grains):
+            grain.ready_event = event
+            grain.mutex.release()
+
+
 class StagingBufferManager:
     __slots__ = ("mutex", "buffer", "grains", "next")
     GRANULARITY: ClassVar[int] = 1 << 20
 
-    @dataclass(slots=True)
-    class GrainMetadata:
-        mutex: threading.Lock  # protects ready_event.
-        ready_event: CachedCudaEvent  # protects the buffer grain.
-
-    mutex: threading.Lock  # protects next.
+    mutex: LockType
     buffer: HostMem
     grains: list[GrainMetadata]
     next: int
@@ -174,7 +249,7 @@ class StagingBufferManager:
         num_grains = size // self.GRANULARITY
         self.buffer = HostMem(size)
         self.grains = [
-            self.GrainMetadata(threading.Lock(), CachedCudaEvent.NULL) for _ in range(num_grains)
+            GrainMetadata(threading.Lock(), CachedCudaEvent.NULL) for _ in range(num_grains)
         ]
         self.next = 0
 
@@ -193,76 +268,12 @@ class StagingBufferManager:
         return self.GRANULARITY * (self.num_grains - self.next)
 
     # max_size is just a hint, the actual size may be smaller.
-    def new(
-        self, min_size: int, max_size: int, stream: CudaStream
-    ) -> "StagingBufferManager.StagingBuffer":
+    def new(self, min_size: int, max_size: int, stream: CudaStream) -> StagingBuffer:
         """
         min_size is the min required size. max_size is for best efforts. Your should query the actual
         size after entering the context.
         """
-        return self.StagingBuffer(self, min_size, max_size, stream)
-
-    class StagingBuffer:
-        __slots__ = ("manager", "min_size", "max_size", "_size", "start_grain", "stream")
-        manager: "StagingBufferManager"
-        min_size: int
-        max_size: int
-        _size: int
-        start_grain: int
-        stream: CudaStream
-
-        def __init__(
-            self, manager: "StagingBufferManager", min_size: int, max_size: int, stream: CudaStream
-        ):
-            self.manager = manager
-            self.min_size = min_size
-            self.max_size = max_size
-            self.stream = stream
-
-        @property
-        def address(self) -> MemAddress:
-            return MemAddress(
-                self.manager.buffer.address + self.start_grain * self.manager.GRANULARITY
-            )
-
-        @property
-        def size(self) -> int:
-            return self._size
-
-        @property
-        def num_grains(self) -> int:
-            return div_up(self._size, self.manager.GRANULARITY)
-
-        @property
-        def grains(self) -> list["StagingBufferManager.GrainMetadata"]:
-            return self.manager.grains[self.start_grain : self.start_grain + self.num_grains]
-
-        def __enter__(self) -> "StagingBufferManager.StagingBuffer":
-            manager = self.manager
-            if self.min_size > manager.size:
-                raise ValueError(f"Requested min_size {self.min_size} is too large for the manager")
-            with manager.mutex:
-                self._size = min(self.max_size, manager._suggest_next_max_size_unsafe())
-                self.start_grain = manager.next
-                manager.next += self.num_grains
-                assert manager.next <= manager.num_grains
-                if manager.next == manager.num_grains:
-                    manager.next = 0
-
-                def lock_and_consume_events() -> Iterator[CachedCudaEvent]:
-                    for grain in self.grains:
-                        grain.mutex.acquire()
-                        yield grain.ready_event
-                        grain.ready_event = CachedCudaEvent.NULL
-
-                stream_wait_events(self.stream, lock_and_consume_events())
-                return self
-
-        def __exit__(self, exc_type, exc_value, traceback) -> None:
-            event = CachedCudaEvent(self.stream)
-            for grain in reversed(self.grains):
-                grain.ready_event = event
-                grain.mutex.release()
+        return StagingBuffer(self, min_size, max_size, stream)
 
 
 class CopyEngine:

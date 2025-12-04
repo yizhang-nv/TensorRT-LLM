@@ -1,4 +1,5 @@
 import functools
+import importlib.util
 import itertools
 import os
 import random
@@ -8,6 +9,11 @@ from contextlib import contextmanager
 from random import randbytes
 from statistics import median
 from typing import Iterator, NamedTuple, cast
+
+if importlib.util.find_spec("kv_cache_manager_v2") is not None:
+    import kv_cache_manager_v2  # noqa: F401
+else:
+    import tensorrt_llm.runtime.kv_cache_manager_v2 as kv_cache_manager_v2  # noqa: F401
 
 from kv_cache_manager_v2 import (
     AttentionLayerConfig,

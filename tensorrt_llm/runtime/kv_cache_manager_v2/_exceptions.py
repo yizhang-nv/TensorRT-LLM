@@ -1,7 +1,7 @@
 import cuda.bindings.driver as drv
 
 
-class OutOfMemoryError(MemoryError):
+class OutOfMemoryError(Exception):
     pass
 
 
@@ -13,16 +13,20 @@ class DiskOOMError(OutOfMemoryError):
     pass
 
 
+class CuOOMError(OutOfMemoryError):
+    pass
+
+
 class LogicError(Exception):
-    '''
+    """
     This exception indicates a bug in the code.
-    '''
+    """
 
     def __init__(self, message: str) -> None:
         super().__init__(message)
 
 
-class CuError(RuntimeError):
+class CuError(Exception):
     error_code: drv.CUresult
 
     def __init__(self, error_code: drv.CUresult) -> None:
@@ -33,15 +37,9 @@ class CuError(RuntimeError):
         super().__init__(f"CUDA driver error: {error_code} ({err_str})")
 
 
-class CuOOMError(CuError, OutOfMemoryError):
-
-    def __init__(self) -> None:
-        super().__init__(drv.CUresult.CUDA_ERROR_OUT_OF_MEMORY)
-
-
-class ResourceBusyError(RuntimeError):
+class ResourceBusyError(Exception):
     pass
 
 
-class OutOfPagesError(RuntimeError):
+class OutOfPagesError(Exception):
     pass

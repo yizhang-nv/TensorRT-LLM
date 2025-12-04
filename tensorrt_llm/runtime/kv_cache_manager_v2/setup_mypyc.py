@@ -51,7 +51,6 @@ sys.argv.extend(["--config-file", mypy_config_path])
 # List all Python modules in kv_cache_manager_v2 to compile
 #
 # EXCLUDED FILES:
-# - _copy_engine.py: imports tensorrt_llm.bindings (external dependency)
 # - _exceptions.py: inherits from builtin Exception classes (mypyc limitation)
 #
 modules = [
@@ -60,9 +59,9 @@ modules = [
     "kv_cache_manager_v2/_block_radix_tree.py",
     "kv_cache_manager_v2/_common.py",
     "kv_cache_manager_v2/_config.py",
-    # _copy_engine.py excluded - imports bindings
+    "kv_cache_manager_v2/_copy_engine.py",
     "kv_cache_manager_v2/_cuda_virt_mem.py",
-    # _exceptions.py excluded - exception inheritance
+    "kv_cache_manager_v2/_exceptions.py",
     "kv_cache_manager_v2/_life_cycle_registry.py",
     "kv_cache_manager_v2/_page.py",
     "kv_cache_manager_v2/_storage_manager.py",
@@ -81,7 +80,7 @@ modules = [
 ]
 
 print(f"Compiling {len(modules)} modules with mypyc...")
-print("Excluded: _copy_engine.py (external imports), _exceptions.py (exception inheritance)")
+print("Excluded: None")
 print("")
 
 try:

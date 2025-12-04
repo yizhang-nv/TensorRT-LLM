@@ -46,8 +46,6 @@ echo "Step 2: Hiding excluded files temporarily..."
 TEMP_DIR=$(mktemp -d)
 mkdir -p "$TEMP_DIR/kv_cache_manager_v2"
 EXCLUDED_KV_FILES=(
-    "kv_cache_manager_v2/_copy_engine.py"
-    "kv_cache_manager_v2/_exceptions.py"
 )
 HIDDEN_COUNT=0
 for excluded_file in "${EXCLUDED_KV_FILES[@]}"; do
@@ -57,7 +55,7 @@ for excluded_file in "${EXCLUDED_KV_FILES[@]}"; do
 done
 
 echo "  ✓ Temporarily hid $HIDDEN_COUNT files from compilation"
-echo "  ℹ Note: Only _copy_engine.py and _exceptions.py are excluded from compilation"
+echo "  ℹ Note: No files are excluded from compilation"
 echo ""
 
 # Build with mypyc
@@ -76,11 +74,7 @@ echo ""
 echo "Step 4: Restoring hidden files..."
 
 # Restore excluded kv_cache_manager_v2 files
-for excluded_file in _copy_engine.py _exceptions.py; do
-    if [ -f "$TEMP_DIR/kv_cache_manager_v2/$excluded_file" ]; then
-        mv "$TEMP_DIR/kv_cache_manager_v2/$excluded_file" kv_cache_manager_v2/ 2>/dev/null
-    fi
-done
+# (None)
 
 # Restore backed up .c files (hand-written source files like rawrefmodule.c)
 if [ -d "$TEMP_C_DIR/kv_cache_manager_v2" ]; then
@@ -114,6 +108,17 @@ echo "Build Results"
 echo "========================================"
 echo ""
 
+# Check for errors first
+if grep -E ".+\.py:[0-9]+: error:" /tmp/mypyc_build_full.log >/dev/null 2>&1; then
+    echo "✗ BUILD FAILED (mypyc errors detected)"
+    echo ""
+    echo "Errors in source files:"
+    grep -E ".+\.py:[0-9]+: error:" /tmp/mypyc_build_full.log
+    echo ""
+    echo "Full build log saved to: /tmp/mypyc_build_full.log"
+    exit 1
+fi
+
 SO_FILES=$(find kv_cache_manager_v2 -name "*.so" -type f 2>/dev/null)
 
 if [ -n "$SO_FILES" ]; then
@@ -135,15 +140,8 @@ if [ -n "$SO_FILES" ]; then
 else
     echo "✗ BUILD FAILED"
     echo ""
-
-    # Check for errors in kv_cache_manager_v2
-    if grep -q "kv_cache_manager_v2.*error:" /tmp/mypyc_build_full.log 2>/dev/null; then
-        echo "Errors in kv_cache_manager_v2 files:"
-        grep "kv_cache_manager_v2.*error:" /tmp/mypyc_build_full.log
-    else
-        echo "No errors found in kv_cache_manager_v2 files."
-        echo "This might be a compilation issue. Check: /tmp/mypyc_build_full.log"
-    fi
+    echo "No compiled modules found and no mypyc errors detected."
+    echo "This might be a compilation issue. Check: /tmp/mypyc_build_full.log"
     echo ""
     echo "Full build log saved to: /tmp/mypyc_build_full.log"
     exit 1
