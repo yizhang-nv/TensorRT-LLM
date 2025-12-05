@@ -199,7 +199,10 @@ class TestNoBatching(TestKVCacheManagerV2):
         tic = time.perf_counter()
         # prefill
         num_reused = kv_cache.num_committed_tokens
-        kv_cache.capacity = round_up(len(prompt), interval)
+        # workaround a mypyc bug: exception in property setter is not propagated
+        # kv_cache.capacity = round_up(len(prompt), interval)
+        if not kv_cache.resize(round_up(len(prompt), interval)):
+            raise OutOfPagesError("Not enough pages in GPU memory")
         capacity = kv_cache.capacity
         history = prompt[:num_reused]
         input = prompt[num_reused:]
@@ -213,7 +216,10 @@ class TestNoBatching(TestKVCacheManagerV2):
             required_capacity = len(history) + 1
             if required_capacity > capacity:
                 kv_cache.commit(history[kv_cache.history_length :])
-                kv_cache.capacity = round_up(required_capacity, interval)
+                # workaround a mypyc bug: exception in property setter is not propagated
+                # kv_cache.capacity = round_up(required_capacity, interval)
+                if not kv_cache.resize(round_up(required_capacity, interval)):
+                    raise OutOfPagesError("Not enough pages in GPU memory")
                 capacity = kv_cache.capacity
             input_token = self.next_token()
             if refcheck:
@@ -246,6 +252,23 @@ class TestNoBatching(TestKVCacheManagerV2):
         kv_cache.close()
         self.manager.clear_reusable_blocks()
         return time_taken
+
+    def test_shrink_capacity(self) -> None:
+        self.prepare(32 << 20, 32 << 20, 1 << 30, 36, 128, 1, kv_buf_size=32768)
+        seq_len = 32 * 10
+        req0 = self.new_request(0, None, 32, seq_len - 32)
+        with TemporaryCudaStream([]) as s:
+            stream = s.handle
+            kv_cache = req0.kv_cache
+            success = kv_cache.resume(stream)
+            assert success
+            success = kv_cache.resize(seq_len)
+            assert success
+            for capacity in range(seq_len, len(req0.prompt), -1):
+                success = kv_cache.resize(capacity)
+                assert success
+        s.take_finish_event()
+        kv_cache.close()
 
     # @assert_no_ref_cycle
     def test_sol_mem_utilization(self) -> None:

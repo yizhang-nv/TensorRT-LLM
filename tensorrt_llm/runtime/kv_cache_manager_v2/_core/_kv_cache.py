@@ -304,7 +304,7 @@ class _KVCache:
     # two APIs) where we use more pages than necessary for SWA layers. So we use a single API to avoid
     # this. Usually this is a concern only for prefill phase where we create many tokens in one step. For
     # other cases, we can just set the capacity and history_length properties instead.
-    def resize(self, capacity: int | None, history_length: int | None) -> bool:
+    def resize(self, capacity: int | None, history_length: int | None = None) -> bool:
         assert self.status == self.Status.ACTIVE
         tokens_per_block = self.tokens_per_block
         assert div_up(self._capacity, tokens_per_block) == len(self._blocks)
@@ -324,7 +324,8 @@ class _KVCache:
         beam_width = BeamIndex(self.beam_width)
         num_life_cycles = self.manager._life_cycles.size
         if new_num_blocks < old_num_blocks:
-            del self._blocks[new_num_blocks:]
+            with self._record_event():
+                del self._blocks[new_num_blocks:]
             for beam_indices in self._page_indices:
                 for indices in beam_indices:
                     assert all(i == BAD_PAGE_INDEX for i in indices[new_num_blocks:])
@@ -388,8 +389,6 @@ class _KVCache:
         necessary for SWA layers.
         Expect OutOfPagesError exception if there are not enough pages in GPU memory.
         """
-        if self._shortcut_set_capacity(capacity):
-            return
         success = self.resize(capacity, None)
         if not success:
             raise OutOfPagesError("Not enough pages in GPU memory")
