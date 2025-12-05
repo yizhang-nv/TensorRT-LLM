@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING, Iterator, Sequence, TypeVar, cast
 from . import rawref
 from ._common import NDEBUG, BlockOrdinal, PageStatus, TokenId, TokenIdExt
 from ._life_cycle_registry import LifeCycle, LifeCycleId, LifeCycleRegistry
-from ._utils import HomoTuple, TypedIndexList, chunked, filled_list, unwrap_rawref
+from ._utils import TypedIndexList, chunked, filled_list, unwrap_rawref
 
 if TYPE_CHECKING:
     from ._page import CommittedPage
@@ -57,14 +57,14 @@ class Hasher:
         return self._hasher.digest()
 
 
-TokenBlock = HomoTuple[TokenIdExt]
+TokenBlock = list[TokenIdExt]
 
 
 def sequence_to_blockchain_keys(
     tokens_per_block: int, lora_task_id: int | None, tokens: Sequence[TokenIdExt]
 ) -> Iterator[tuple[TokenBlock, BlockKey]]:
     digest = Hasher(lora_task_id).digest
-    yield (), digest
+    yield [], digest
     for token_block in chunked(tokens, tokens_per_block):
         digest = Hasher(digest).update(token_block).digest
         yield token_block, digest
@@ -114,8 +114,9 @@ def remove_subtree(root: "RootBlock | Block") -> list[rawref.ref["CommittedPage"
 def traverse_post_order(root: "Block") -> Iterator["Block"]:
     "post-order traversal of the subtree rooted at root"
     stack: list[Iterator[Block]] = []
-    block = root
+    block: Block | None = root
     while True:
+        assert block is not None
         if block.next:
             child_iter = iter(block.next.values())
             stack.append(child_iter)
@@ -394,8 +395,8 @@ class BlockRadixTree:
         tokens: Sequence[TokenIdExt],
         enable_partial_match: bool = False,
     ) -> Iterator[tuple[Block, int]]:
-        block = self
-        mismatched_token_block = ()
+        block: Block | RootBlock | BlockRadixTree = self
+        mismatched_token_block: TokenBlock = []
         for token_block, key in sequence_to_blockchain_keys(
             self._tokens_per_block, lora_task_id, tokens
         ):
@@ -408,10 +409,11 @@ class BlockRadixTree:
                 mismatched_token_block = token_block
                 break
         if mismatched_token_block and enable_partial_match:
-            block, match_len = find_best_partial_match_in_next_nodes(
+            partial_block, match_len = find_best_partial_match_in_next_nodes(
                 cast(Block | RootBlock, block), mismatched_token_block
             )
-            if block is not None:
+            if partial_block is not None:
+                block = partial_block
                 yield block, match_len
 
     def _check_sanity(self) -> bool:

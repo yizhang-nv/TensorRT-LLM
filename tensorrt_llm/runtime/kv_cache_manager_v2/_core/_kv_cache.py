@@ -7,7 +7,7 @@ from itertools import chain
 from typing import TYPE_CHECKING, Any, Callable, ClassVar, Iterable, Iterator, Type, cast
 
 from .. import rawref
-from .._block_radix_tree import Block, UselessBlockError
+from .._block_radix_tree import Block, RootBlock, UselessBlockError
 from .._common import (
     BAD_PAGE_INDEX,
     GPU_LEVEL,
@@ -567,6 +567,7 @@ class _KVCache:
         is_full = num_tokens == tokens_per_block
         if not is_last and not is_full:
             raise LogicError("Cannot commit block that is not full except last block")
+        prev: RootBlock | Block
         if ordinal == 0:
             prev = self.manager._radix_tree.add_or_get_existing(self._lora_task_id)
         else:

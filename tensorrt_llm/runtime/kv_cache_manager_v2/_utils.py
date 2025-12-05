@@ -130,10 +130,10 @@ def remove_if(original: MutableSequence[T], predicate: Callable[[T], bool]) -> l
     return removed
 
 
-def chunked(iterable: Iterable[T], size: int) -> Iterator[tuple[T, ...]]:
+def chunked(iterable: Iterable[T], size: int) -> Iterator[list[T]]:
     iterator = iter(iterable)
     while True:
-        chunk = tuple(itertools.islice(iterator, size))
+        chunk = list(itertools.islice(iterator, size))
         if not chunk:
             break
         yield chunk
