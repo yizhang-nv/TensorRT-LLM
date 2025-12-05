@@ -93,13 +93,59 @@ try:
         strip_asserts=False,  # Keep assertions for debugging
     )
 
-    # Remove --config-file arguments from sys.argv before calling setup()
-    # This prevents setuptools from seeing arguments it doesn't understand
-    if "--config-file" in sys.argv:
-        idx = sys.argv.index("--config-file")
-        sys.argv.pop(idx)  # Remove '--config-file'
-        if idx < len(sys.argv):  # Remove the path that follows it
-            sys.argv.pop(idx)
+    # Generate stub files using stubgen
+    print("Generating stub files...")
+    import subprocess
+
+    # We are inside kv_cache_manager_v2 directory when running this script,
+    # but stubgen needs to see kv_cache_manager_v2 as a package from its parent directory.
+    # The modules list above uses relative paths like "kv_cache_manager_v2/__init__.py".
+    #
+    # When running from tensorrt_llm/runtime (as the Makefile does), current dir is runtime.
+    # So "kv_cache_manager_v2" is a subdirectory.
+
+    # Convert file paths to module names for stubgen
+    # We list modules explicitly to avoid recursing into rawref (which has manual stubs)
+    stub_modules = []
+    for m in modules:
+        # Remove .py extension
+        if m.endswith(".py"):
+            mod = m[:-3]
+        else:
+            mod = m
+
+        # Replace file separators with dots
+        mod = mod.replace("/", ".")
+
+        # Remove .__init__ suffix to get the package name
+        if mod.endswith(".__init__"):
+            mod = mod[:-9]
+
+        stub_modules.append(mod)
+
+    # We use --ignore-errors to avoid failing on imports
+    cmd = ["stubgen"]
+    for m in stub_modules:
+        cmd.extend(["-m", m])
+    cmd.extend(["--include-private", "-o", ".", "--ignore-errors"])
+
+    # Ensure we run stubgen from the parent of kv_cache_manager_v2 package
+    # If the script is run from inside kv_cache_manager_v2, we need to go up one level.
+    cwd = os.getcwd()
+    if os.path.basename(cwd) == "kv_cache_manager_v2":
+        cwd = os.path.dirname(cwd)
+
+    # Set PYTHONPATH to include the parent directory so kv_cache_manager_v2 can be imported
+    env = os.environ.copy()
+    pythonpath = env.get("PYTHONPATH", "")
+    if pythonpath:
+        pythonpath += os.pathsep + cwd
+    else:
+        pythonpath = cwd
+    env["PYTHONPATH"] = pythonpath
+
+    subprocess.check_call(cmd, cwd=cwd, env=env)
+
 except Exception as e:
     print(f"Error during mypyc compilation: {e}")
     ext_modules = []
@@ -111,8 +157,20 @@ finally:
         except OSError:
             pass
 
+    # Remove --config-file arguments from sys.argv before calling setup()
+    # This prevents setuptools from seeing arguments it doesn't understand
+    while "--config-file" in sys.argv:
+        idx = sys.argv.index("--config-file")
+        sys.argv.pop(idx)  # Remove '--config-file'
+        if idx < len(sys.argv):  # Remove the path that follows it
+            sys.argv.pop(idx)
+
 setup(
     name="kv_cache_manager_v2_compiled",
     ext_modules=ext_modules,
+    packages=["kv_cache_manager_v2.rawref"],
+    package_data={
+        "kv_cache_manager_v2": ["*.pyi", "**/*.pyi"],
+    },
     python_requires=">=3.8",
 )

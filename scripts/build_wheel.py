@@ -441,6 +441,26 @@ def generate_python_stubs_windows(binding_type: str, venv_python: Path,
         (pkg_dir / stubgen).unlink()
 
 
+def build_kv_cache_manager_v2(project_dir, venv_python):
+    print("-- Building kv_cache_manager_v2...")
+    kv_cache_mgr_dir = project_dir / "tensorrt_llm/runtime/kv_cache_manager_v2"
+
+    # Build rawref
+    print("-- Building kv_cache_manager_v2 rawref extension...")
+    rawref_dir = kv_cache_mgr_dir / "rawref"
+    build_run(f'"{venv_python}" setup.py build_ext --inplace', cwd=rawref_dir)
+
+    # Build mypyc
+    print("-- Building kv_cache_manager_v2 mypyc extensions...")
+    runtime_dir = project_dir / "tensorrt_llm/runtime"
+    # setup_mypyc.py is in kv_cache_manager_v2 but executed from runtime dir
+    setup_mypyc = kv_cache_mgr_dir / "setup_mypyc.py"
+    # Install mypy
+    build_run(f'"{venv_python}" -m pip install mypy')
+    build_run(f'"{venv_python}" "{setup_mypyc}" build_ext --inplace',
+              cwd=runtime_dir)
+
+
 def main(*,
          build_type: str = "Release",
          generator: str = "",
@@ -928,6 +948,8 @@ def main(*,
                         bool(deep_ep_cuda_architectures),
                         bool(flash_mla_cuda_architectures),
                         binding_lib_file_name)
+
+    build_kv_cache_manager_v2(project_dir, venv_python)
 
     if not skip_building_wheel:
         if dist_dir is None:
