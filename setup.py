@@ -12,12 +12,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import glob
 import os
 import platform
+import shutil
 from pathlib import Path
 from typing import List
 
-from setuptools import find_packages, setup
+from setuptools import Extension, find_packages, setup
+from setuptools.command.build_ext import build_ext
 from setuptools.dist import Distribution
 
 
@@ -90,6 +93,33 @@ class BinaryDistribution(Distribution):
 
     def has_ext_modules(self):
         return True
+
+
+# Custom extension handling to include prebuilt shared libraries at the top level of the wheel
+class PrebuiltExtension(Extension):
+
+    def __init__(self, name, source):
+        self.source = source
+        super().__init__(name, sources=[])
+
+
+class CopyPrebuiltExt(build_ext):
+
+    def build_extension(self, ext):
+        if isinstance(ext, PrebuiltExtension):
+            # Calculate the target path for the extension
+            fullname = self.get_ext_fullname(ext.name)
+            filename = self.get_ext_filename(fullname)
+            target = os.path.join(self.build_lib, filename)
+
+            # Ensure target directory exists
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+
+            # Copy the prebuilt file
+            print(f"Copying prebuilt extension {ext.source} to {target}")
+            shutil.copy(ext.source, target)
+        else:
+            super().build_extension(ext)
 
 
 on_windows = platform.system() == "Windows"
@@ -291,6 +321,15 @@ exclude_package_data = {
     "tensorrt_llm.runtime.kv_cache_manager_v2": ["*.py", "**/*.py"],
 }
 
+# Find the prebuilt mypyc shared object in the root directory
+mypyc_ext_modules = []
+mypyc_so_files = glob.glob("*__mypyc*.so")
+if mypyc_so_files:
+    for so_file in mypyc_so_files:
+        # Extract module name from filename (e.g. 52...__mypyc from 52...__mypyc.cpython-312....so)
+        module_name = so_file.split('.')[0]
+        mypyc_ext_modules.append(PrebuiltExtension(module_name, so_file))
+
 # https://setuptools.pypa.io/en/latest/references/keywords.html
 setup(
     name='tensorrt_llm',
@@ -306,6 +345,8 @@ setup(
     download_url="https://github.com/NVIDIA/TensorRT-LLM/tags",
     packages=packages,
     exclude_package_data=exclude_package_data,
+    ext_modules=mypyc_ext_modules,
+    cmdclass={'build_ext': CopyPrebuiltExt},
     # TODO Add windows support for python bindings.
     classifiers=[
         "Development Status :: 4 - Beta",

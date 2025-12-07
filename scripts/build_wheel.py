@@ -460,6 +460,14 @@ def build_kv_cache_manager_v2(project_dir, venv_python):
     build_run(f'"{venv_python}" "{setup_mypyc}" build_ext --inplace',
               cwd=runtime_dir)
 
+    # Move the mypyc shared library to the project root so it's installed in site-packages
+    # This is required because mypyc-compiled modules in kv_cache_manager_v2 (subpackage)
+    # import this shared library as a top-level module (absolute import).
+    print("-- Moving mypyc shared library to project root...")
+    for so_file in runtime_dir.glob("*__mypyc*.so"):
+        print(f"Moving {so_file.name} to {project_dir}")
+        shutil.move(str(so_file), str(project_dir / so_file.name))
+
 
 def main(*,
          build_type: str = "Release",

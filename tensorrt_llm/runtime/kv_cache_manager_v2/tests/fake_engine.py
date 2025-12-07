@@ -1,26 +1,48 @@
 import itertools
 from collections.abc import Sequence
 from functools import cached_property
+from importlib.util import find_spec
 from typing import NamedTuple
 
-from kv_cache_manager_v2 import (
-    BeamIndex,
-    CudaStream,
-    KVCacheManagerConfig,
-    LayerId,
-    TokenIdExt,
-    _KVCache,
-)
-from kv_cache_manager_v2._common import BAD_PAGE_INDEX, NDEBUG, MemAddress
-from kv_cache_manager_v2._config import AttentionLayerConfig, DataRole
-from kv_cache_manager_v2._utils import (
-    div_up,
-    exact_div,
-    get_uniform_attribute,
-    overlap,
-    typed_range,
-    value_or,
-)
+if find_spec("kv_cache_manager_v2") is not None:
+    from kv_cache_manager_v2 import (
+        BeamIndex,
+        CudaStream,
+        KVCacheManagerConfig,
+        LayerId,
+        TokenIdExt,
+        _KVCache,
+    )
+    from kv_cache_manager_v2._common import BAD_PAGE_INDEX, NDEBUG, MemAddress
+    from kv_cache_manager_v2._config import AttentionLayerConfig, DataRole
+    from kv_cache_manager_v2._utils import (
+        div_up,
+        exact_div,
+        get_uniform_attribute,
+        overlap,
+        typed_range,
+        value_or,
+    )
+else:
+    from tensorrt_llm.runtime.kv_cache_manager_v2 import (
+        BeamIndex,
+        CudaStream,
+        KVCacheManagerConfig,
+        LayerId,
+        TokenIdExt,
+        _KVCache,
+    )
+    from tensorrt_llm.runtime.kv_cache_manager_v2._common import BAD_PAGE_INDEX, NDEBUG, MemAddress
+    from tensorrt_llm.runtime.kv_cache_manager_v2._config import AttentionLayerConfig, DataRole
+    from tensorrt_llm.runtime.kv_cache_manager_v2._utils import (
+        div_up,
+        exact_div,
+        get_uniform_attribute,
+        overlap,
+        typed_range,
+        value_or,
+    )
+
 
 from .kernels import check_values, fill_values
 

@@ -1,3 +1,4 @@
+from . import rawref
 from ._block_radix_tree import gen_multi_modal_tokens
 from ._common import (
     NDEBUG,
@@ -42,4 +43,5 @@ __all__ = [
     "HostCacheTierConfig",
     "CacheTierConfig",
     "gen_multi_modal_tokens",
+    "rawref",
 ]

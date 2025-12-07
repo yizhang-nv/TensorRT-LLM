@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from . import kv_cache_manager_v2
 from .enc_dec_model_runner import EncDecModelRunner
 from .generation import SamplingConfig  # autoflake: skip
 from .generation import (ChatGLMGenerationSession, GenerationSession,
@@ -52,4 +53,5 @@ __all__ = [
     'EncDecModelRunner',
     'MultimodalModelRunner',
     'PYTHON_BINDINGS',
+    'kv_cache_manager_v2',
 ]
