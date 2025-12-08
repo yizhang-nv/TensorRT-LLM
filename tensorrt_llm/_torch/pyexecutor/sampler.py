@@ -250,26 +250,6 @@ def _unwrap_singleton(p: Optional[list[T]]) -> Optional[T]:
     return t
 
 
-def _get_beam_width_in(request: LlmRequest) -> int:
-    return (
-        1
-        if request.is_context_init_state
-        else request.get_beam_width_by_iter(for_next_iteration=False)
-    )
-
-
-def _get_beam_width_out(request: LlmRequest) -> int:
-    return request.get_beam_width_by_iter(for_next_iteration=True)
-
-
-def _get_max_beam_width(request: LlmRequest) -> int:
-    sampling_config = request.sampling_config
-    max_beam_width = sampling_config.beam_width
-    if sampling_config.beam_width_array is not None:
-        max_beam_width = max(max_beam_width, sampling_config.beam_width_array.max())
-    return max_beam_width
-
-
 def _request_get_sampling_params(request: LlmRequest) -> UtilsSamplingParams:
     if MYPYCLIB_ENABLED:
         import mypyclib
