@@ -32,4 +32,3 @@ clean_rawref:
 clean_mypyc:
 	rm -rf $(RUNTIME_DIR)/build
 	find . -name "*.so" -type f ! -path "./rawref/*" -delete
-	find . -name "*.pyi" -type f ! -path "./rawref/*" -delete

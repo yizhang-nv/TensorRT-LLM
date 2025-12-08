@@ -35,8 +35,6 @@ if find_spec("kv_cache_manager_v2") is not None:
         typed_range,
         unwrap_weakref,
     )
-    from kv_cache_manager_v2.tests.fake_engine import FakeEngine, Role, Step
-    from kv_cache_manager_v2.tests.kernels import enable_kernel_delay
 else:
     from tensorrt_llm.runtime.kv_cache_manager_v2 import (
         AttentionLayerConfig,
@@ -66,11 +64,11 @@ else:
         typed_range,
         unwrap_weakref,
     )
-    from tensorrt_llm.runtime.kv_cache_manager_v2.tests.fake_engine import FakeEngine, Role, Step
-    from tensorrt_llm.runtime.kv_cache_manager_v2.tests.kernels import enable_kernel_delay
-
 
 from parameterized import parameterized
+
+from tests.fake_engine import FakeEngine, Role, Step
+from tests.kernels import enable_kernel_delay
 
 seed = int.from_bytes(os.urandom(8), "little")
 print(f"seed: {seed}")

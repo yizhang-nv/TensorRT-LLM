@@ -21,8 +21,11 @@ from ._config import (
     KVCacheManagerConfig,
 )
 from ._core import BeamIndex, KVCacheManager, _KVCache
+from ._life_cycle_registry import LayerGroupId, LifeCycleId
 
 __all__ = [
+    "LifeCycleId",
+    "LayerGroupId",
     "TokenId",
     "TokenIdExt",
     "KVCacheManager",
