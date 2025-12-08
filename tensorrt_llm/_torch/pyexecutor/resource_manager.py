@@ -1404,6 +1404,10 @@ class KVCacheManagerV2(BaseResourceManager):
         logger.info(
             f"Allocated {self.quota.quota / (1 << 30)} GiB in paged KV cache.")
 
+        buffer_type = [Role.KEY]
+        if kv_cache_type != CacheTypeCpp.SELFKONLY:
+            buffer_type.append(Role.VALUE)
+
         config = KVCacheManagerConfigPy(
             tokens_per_block=tokens_per_block,
             vocab_size=vocab_size,
@@ -1419,17 +1423,11 @@ class KVCacheManagerV2(BaseResourceManager):
                     layer_id=layer_id,
                     buffers=[
                         BufferConfig(
-                            role=Role.KEY,
+                            role=role,
                             size=self.get_cache_bytes_per_token(
-                                local_layer_idx=layer_id, data_role=Role.KEY) *
+                                local_layer_idx=layer_id, data_role=role) *
                             tokens_per_block,
-                        ),
-                        BufferConfig(
-                            role=Role.VALUE,
-                            size=self.get_cache_bytes_per_token(
-                                local_layer_idx=layer_id, data_role=Role.VALUE)
-                            * tokens_per_block,
-                        ),
+                        ) for role in buffer_type
                     ],
                     sliding_window_size=self.max_attention_window_vec[
                         layer_id % len(self.max_attention_window_vec)],
@@ -1878,7 +1876,7 @@ class KVCacheManagerV2(BaseResourceManager):
             if req.py_request_id not in self.kv_cache_map:
                 continue
             kv_cache = self.kv_cache_map[req.py_request_id]
-            kv_cache.history_length += 1
+            kv_cache.history_length = req.max_beam_num_tokens - 1
 
     @nvtx_range("copy_batch_block_offsets")
     def copy_batch_block_offsets(self, dst_tensor: torch.Tensor,

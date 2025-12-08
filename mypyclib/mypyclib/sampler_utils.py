@@ -2,7 +2,7 @@ import sys
 from collections import defaultdict
 from collections.abc import Iterable
 from itertools import repeat
-from typing import Callable, List, Optional, TypeVar, cast
+from typing import Callable, Optional, TypeVar, cast
 
 import torch
 
@@ -106,7 +106,7 @@ def _group_requests_by_strategy_key_impl(
     strategy_to_key: Callable[[Strategy, bool], GenericStrategyKeyType],
     pin_memory: bool = False,
     vocab_size: int,
-) -> dict[tuple[GenericStrategyKeyType, bool], tuple[torch.Tensor, List[Strategy]]]:
+) -> dict[tuple[GenericStrategyKeyType, bool], tuple[torch.Tensor, list[Strategy]]]:
     # NB: Client code relies on request indices in returned torch.Tensor being sorted.
     group_dict: dict[tuple[GenericStrategyKeyType, bool], tuple[list[int], list[Strategy]]] = (
         defaultdict(lambda: ([], []))
