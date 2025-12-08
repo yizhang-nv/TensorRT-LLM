@@ -1,3 +1,4 @@
+import atexit
 import sys
 import threading
 from _thread import LockType
@@ -10,17 +11,13 @@ from pathlib import Path
 from typing import ClassVar, NamedTuple, Sequence, cast
 
 import cuda.bindings.driver as drv
+from dynamic_path_manager import DynamicPathManager
 
 from ._common import Address, CacheTier, CudaStream, MemAddress
 from ._utils import CachedCudaEvent, HomoTuple, HostMem, _unwrap, div_up, stream_wait_events
 
-spec = find_spec("kv_cache_manager_v2")
-
-if spec is not None:
-    # fast path for dev, avoids importing the whole tensorrt_llm module
-    assert spec.origin is not None
-    sys.path.append(str(Path(spec.origin).parent.parent.parent))
-    from bindings.internal.batch_manager.kv_cache_manager_v2_utils import (  # noqa: F401, E402
+if "tensorrt_llm" in sys.modules:
+    from tensorrt_llm.bindings.internal.batch_manager.kv_cache_manager_v2_utils import (  # noqa # type: ignore
         DiskAddress,
         DiskToDiskTask,
         DiskToHostTask,
@@ -34,23 +31,25 @@ if spec is not None:
         copy_host_to_disk,
         copy_host_to_host,
     )
-
-    sys.path.pop()
 else:
-    from tensorrt_llm.bindings.internal.batch_manager.kv_cache_manager_v2_utils import (  # noqa: F401, E402 # type: ignore
-        DiskAddress,
-        DiskToDiskTask,
-        DiskToHostTask,
-        HostToDiskTask,
-        MemToMemTask,
-        copy_device_to_device,
-        copy_device_to_host,
-        copy_disk_to_disk,
-        copy_disk_to_host,
-        copy_host_to_device,
-        copy_host_to_disk,
-        copy_host_to_host,
-    )
+    # fast path for dev, avoids importing the whole tensorrt_llm module
+    spec = find_spec("kv_cache_manager_v2")
+    assert spec is not None and spec.origin is not None
+    with DynamicPathManager(str(Path(spec.origin).parent.parent.parent)):
+        from bindings.internal.batch_manager.kv_cache_manager_v2_utils import (  # noqa
+            DiskAddress,
+            DiskToDiskTask,
+            DiskToHostTask,
+            HostToDiskTask,
+            MemToMemTask,
+            copy_device_to_device,
+            copy_device_to_host,
+            copy_disk_to_disk,
+            copy_disk_to_host,
+            copy_host_to_device,
+            copy_host_to_disk,
+            copy_host_to_host,
+        )
 
 
 class CopyTask(NamedTuple):
@@ -296,6 +295,9 @@ class CopyEngine:
     def __init__(self) -> None:
         self._staging_buffer_manager = None
 
+    def close(self) -> None:
+        self._staging_buffer_manager = None
+
     @property
     def staging_buffer_manager(self) -> StagingBufferManager:
         if self._staging_buffer_manager is None:
@@ -344,6 +346,7 @@ class CopyEngine:
 
 
 _copy_engine = CopyEngine()
+atexit.register(_copy_engine.close)
 
 
 def batched_copy(

@@ -131,6 +131,10 @@ class TestKVCacheManagerV2(unittest.TestCase):
         init_cuda_once()
         self._token_id_gen = itertools.count()
 
+    def tearDown(self) -> None:
+        if hasattr(self, "manager"):
+            del self.manager
+
     def next_token(self) -> TokenIdExt:
         token_id = next(self._token_id_gen)
         if token_id % 100 == 99:
@@ -611,7 +615,6 @@ class TestBatching(TestKVCacheManagerV2):
                 f"num_decode_tokens: {self.acc_num_decode_tokens})"
             )
         stream.take_finish_event().synchronize()
-        del self.manager
 
 
 class TestDisagg(TestKVCacheManagerV2):
