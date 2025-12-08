@@ -43,8 +43,12 @@ else:
         value_or,
     )
 
+import os
 
-from .kernels import check_values, fill_values
+from dynamic_path_manager import DynamicPathManager
+
+with DynamicPathManager(os.path.dirname(os.path.abspath(__file__))):
+    from kernels import check_values, fill_values
 
 
 class Step(NamedTuple):

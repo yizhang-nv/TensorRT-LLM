@@ -1,4 +1,5 @@
 import functools
+import gc
 import itertools
 import os
 import random
@@ -65,10 +66,12 @@ else:
         unwrap_weakref,
     )
 
+from dynamic_path_manager import DynamicPathManager
 from parameterized import parameterized
 
-from tests.fake_engine import FakeEngine, Role, Step
-from tests.kernels import enable_kernel_delay
+with DynamicPathManager(os.path.dirname(os.path.abspath(__file__))):
+    from fake_engine import FakeEngine, Role, Step
+    from kernels import enable_kernel_delay
 
 seed = int.from_bytes(os.urandom(8), "little")
 print(f"seed: {seed}")
@@ -128,8 +131,11 @@ class TestKVCacheManagerV2(unittest.TestCase):
     def setUp(self) -> None:
         init_cuda_once()
         self._token_id_gen = itertools.count()
+        gc.collect()
+        gc.disable()
 
     def tearDown(self) -> None:
+        gc.enable()
         if hasattr(self, "manager"):
             del self.manager
 
