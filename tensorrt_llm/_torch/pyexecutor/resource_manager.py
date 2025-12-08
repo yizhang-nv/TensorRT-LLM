@@ -6,6 +6,7 @@ from collections import OrderedDict, defaultdict, deque
 from typing import (TYPE_CHECKING, Dict, Iterable, List, Optional, Set, Tuple,
                     Union)
 
+import numba
 import numpy as np
 import torch
 
@@ -1887,6 +1888,38 @@ class KVCacheManagerV2(BaseResourceManager):
                                  offset: int):
         assert beam_width == 1, "beam_width must be 1 for KVCacheManager"
 
+        import os
+        copy_fashion = os.environ.get("COPY_FASHION", "nanobind")
+        naive_python = copy_fashion == "naive"
+        numba = copy_fashion == "numba"
+        mypyc = copy_fashion == "mypyc"
+        nanobind = copy_fashion == "nanobind"
+
+        if not nanobind:
+            batch_cache_indices = []
+
+            for pool_idx in range(self.num_pools):
+                for req_id in request_ids:
+                    batch_cache_indices.append(
+                        np.asarray(self.kv_cache_map[req_id].get_page_indices(
+                            pool_idx)))
+
+            if len(batch_cache_indices) > 0:
+                if naive_python:
+                    func = copy_batch_block_offsets
+                elif numba:
+                    func = copy_batch_block_offsets_numba
+                elif mypyc:
+                    from mypyclib import \
+                        copy_batch_block_offsets as \
+                        copy_batch_block_offsets_mypyc
+                    func = copy_batch_block_offsets_mypyc
+                else:
+                    raise ValueError(f"Invalid copy fashion: {copy_fashion}")
+                func(dst_tensor.numpy(), len(request_ids), batch_cache_indices,
+                     self.num_pools, offset)
+                return
+
         batch_cache_indices = []
 
         for pool_idx in range(self.num_pools):
@@ -1899,6 +1932,33 @@ class KVCacheManagerV2(BaseResourceManager):
             copy_batch_block_offsets_nanobind(dst_tensor, len(request_ids),
                                               batch_cache_indices,
                                               self.num_pools, offset)
+
+
+@numba.jit(nopython=True)
+def copy_batch_block_offsets_numba(dst_tensor: np.ndarray, batch_size: int,
+                                   batch_cache_indices: List[np.ndarray],
+                                   num_pools: int, offset: int):
+    for pool_idx in range(num_pools):
+        for idx in range(batch_size):
+            batch_idx = pool_idx * batch_size + idx
+            batch_cache_index = batch_cache_indices[batch_idx]
+            dst_tensor[pool_idx, idx + offset,
+                       0, :len(batch_cache_index)] = batch_cache_index
+            dst_tensor[pool_idx, idx + offset,
+                       1, :len(batch_cache_index)] = batch_cache_index + 1
+
+
+def copy_batch_block_offsets(dst_tensor: np.ndarray, batch_size: int,
+                             batch_cache_indices: List[np.ndarray],
+                             num_pools: int, offset: int):
+    for pool_idx in range(num_pools):
+        for idx in range(batch_size):
+            batch_idx = pool_idx * batch_size + idx
+            batch_cache_index = batch_cache_indices[batch_idx]
+            dst_tensor[pool_idx, idx + offset,
+                       0, :len(batch_cache_index)] = batch_cache_index
+            dst_tensor[pool_idx, idx + offset,
+                       1, :len(batch_cache_index)] = batch_cache_index + 1
 
 
 class SlotManager:
