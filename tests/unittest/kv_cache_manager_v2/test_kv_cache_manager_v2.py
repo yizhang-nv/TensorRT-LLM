@@ -193,10 +193,12 @@ class TestKVCacheManagerV2(unittest.TestCase):
                     BufferConfig(role=Role.VALUE_BLOCK_QUANT, size=block_quant_buf_size),
                 ]
             )
+        disk_path_candidates = ["/workspace/", "/tmp/nvidia-mps/", "/tmp"]
+        disk_path = next(p for p in disk_path_candidates if os.path.exists(p))
         cache_tiers = [
             GpuCacheTierConfig(quota=gpu_quota),
             HostCacheTierConfig(quota=host_quota),
-            DiskCacheTierConfig(quota=disk_quota, path="/workspace/"),
+            DiskCacheTierConfig(quota=disk_quota, path=disk_path),
         ]
         self.cfg = KVCacheManagerConfig(
             tokens_per_block=tokens_per_block,

@@ -95,7 +95,7 @@ try:
 
 except Exception as e:
     print(f"Error during mypyc compilation: {e}")
-    ext_modules = []
+    sys.exit(1)
 finally:
     # Cleanup temp config
     if os.path.exists(mypy_config_path):

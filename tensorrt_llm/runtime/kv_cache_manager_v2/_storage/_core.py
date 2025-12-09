@@ -1,6 +1,8 @@
 import abc
+import errno
 import itertools
 import os
+import tempfile
 import warnings
 from collections import deque
 from collections.abc import Sequence
@@ -160,7 +162,19 @@ class DiskSlotPool(SlotPoolBase):
         self.filename = filename
         folder = os.path.dirname(filename)
         assert os.path.isdir(folder), f"Folder {folder} does not exist"
-        self._fd = FileDescriptor(os.open(folder, os.O_TMPFILE | os.O_RDWR | os.O_EXCL, 0o664))
+        try:
+            fd = os.open(folder, os.O_TMPFILE | os.O_RDWR | os.O_EXCL, 0o664)
+        except OSError as e:
+            if e.errno != errno.EOPNOTSUPP:
+                raise
+            # Fallback for filesystems/architectures not supporting O_TMPFILE
+            fd, path = tempfile.mkstemp(dir=folder)
+            try:
+                os.unlink(path)
+            except OSError:
+                os.close(fd)
+                raise
+        self._fd = FileDescriptor(fd)
         self.resize(num_slots)
 
     @override

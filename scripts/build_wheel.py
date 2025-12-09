@@ -455,8 +455,6 @@ def build_kv_cache_manager_v2(project_dir, venv_python):
     runtime_dir = project_dir / "tensorrt_llm/runtime"
     # setup_mypyc.py is in kv_cache_manager_v2 but executed from runtime dir
     setup_mypyc = kv_cache_mgr_dir / "setup_mypyc.py"
-    # Install mypy
-    build_run(f'"{venv_python}" -m pip install mypy')
     build_run(f'"{venv_python}" "{setup_mypyc}" build_ext --inplace',
               cwd=runtime_dir)
 
@@ -464,9 +462,15 @@ def build_kv_cache_manager_v2(project_dir, venv_python):
     # This is required because mypyc-compiled modules in kv_cache_manager_v2 (subpackage)
     # import this shared library as a top-level module (absolute import).
     print("-- Moving mypyc shared library to project root...")
+    moved_files = False
     for so_file in runtime_dir.glob("*__mypyc*.so"):
         print(f"Moving {so_file.name} to {project_dir}")
         shutil.move(str(so_file), str(project_dir / so_file.name))
+        moved_files = True
+
+    if not moved_files:
+        raise RuntimeError(
+            "Failed to build kv_cache_manager_v2: no shared library generated.")
 
 
 def main(*,
