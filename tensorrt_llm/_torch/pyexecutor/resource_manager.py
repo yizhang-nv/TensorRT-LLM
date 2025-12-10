@@ -1880,7 +1880,7 @@ class KVCacheManagerV2(BaseResourceManager):
             if req.py_request_id not in self.kv_cache_map:
                 continue
             kv_cache = self.kv_cache_map[req.py_request_id]
-            kv_cache.history_length += 1
+            kv_cache.history_length = req.max_beam_num_tokens - 1
 
     @nvtx_range("copy_batch_block_offsets")
     def copy_batch_block_offsets(self, dst_tensor: torch.Tensor,
