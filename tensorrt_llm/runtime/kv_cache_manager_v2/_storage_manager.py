@@ -312,7 +312,7 @@ class StorageManager:
                     dbg_rawrefs = [rawref.ref(p) for p in evicted[pg_idx]]
                 evicted[pg_idx].clear()
                 if not NDEBUG:
-                    assert all(p() is None for p in dbg_rawrefs)
+                    assert all(p() is None for p in dbg_rawrefs)  # pyright: ignore
                 new_free_cnt = storage.get_num_free_slots(pg_idx)
                 # GC of some pages may trigger removal of radix tree blocks and some other pages.
                 assert new_free_cnt >= num_evicted + old_free_cnt
@@ -487,17 +487,17 @@ class StorageManager:
             )
         return ret
 
-    @property
-    def utilization(self) -> TypedIndexList[PoolGroupIndex, float]:
+    def get_utilization(
+        self, level: CacheLevel = GPU_LEVEL
+    ) -> TypedIndexList[PoolGroupIndex, float]:
         ret = make_typed(lambda: 0.0, self.num_pool_groups)
-        stats = self.get_statistics()
+        stats = self.get_statistics(level)
         for pg_idx in typed_range(self.num_pool_groups):
             ret[pg_idx] = stats[pg_idx].unavailable / stats[pg_idx].total
         return ret
 
-    @property
-    def overall_utilization(self) -> float:
-        stats = self.get_statistics()
+    def get_overall_utilization(self, level: CacheLevel = GPU_LEVEL) -> float:
+        stats = self.get_statistics(level)
         return sum(sum(s.slot_size) * s.unavailable for s in stats) / sum(
             sum(s.slot_size) * s.total for s in stats
         )

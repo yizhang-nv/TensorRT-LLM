@@ -55,8 +55,8 @@ def _unwrap(
     | tuple[drv.CUresult, T, U],
 ):
     if isinstance(ret, drv.CUresult):
-        if int(ret) != int(drv.CUresult.CUDA_SUCCESS):
-            if int(ret) == int(drv.CUresult.CUDA_ERROR_OUT_OF_MEMORY):
+        if int(ret) != int(drv.CUresult.CUDA_SUCCESS):  # pyright: ignore
+            if int(ret) == int(drv.CUresult.CUDA_ERROR_OUT_OF_MEMORY):  # pyright: ignore
                 raise CuOOMError()
             raise CuError(ret)
     else:
@@ -709,7 +709,7 @@ class CachedCudaEvent(ItemHolderBase[drv.CUevent]):
         if CachedCudaEvent._pool is None:
             CachedCudaEvent._pool = SimplePool[drv.CUevent](
                 lambda: _unwrap(drv.cuEventCreate(drv.CUevent_flags.CU_EVENT_DISABLE_TIMING)),
-                lambda ev: _unwrap(drv.cuEventDestroy(ev)),
+                lambda ev: _unwrap(drv.cuEventDestroy(ev)),  # pyright: ignore
                 init_size=1024,
             )
         return CachedCudaEvent._pool
@@ -770,9 +770,9 @@ class CachedCudaStream(ItemHolderBase[CudaStream]):
         if CachedCudaStream._pool is None:
             CachedCudaStream._pool = SimplePool[CudaStream](
                 lambda: CudaStream(
-                    int(_unwrap(drv.cuStreamCreate(drv.CUstream_flags.CU_STREAM_NON_BLOCKING)))
+                    int(_unwrap(drv.cuStreamCreate(drv.CUstream_flags.CU_STREAM_NON_BLOCKING)))  # pyright: ignore
                 ),
-                lambda stream: _unwrap(drv.cuStreamDestroy(stream)),
+                lambda stream: _unwrap(drv.cuStreamDestroy(stream)),  # pyright: ignore
                 init_size=128,
             )
         return CachedCudaStream._pool
@@ -886,7 +886,7 @@ HolderT = TypeVar("HolderT", bound=ItemHolderWithSharedPool)
 
 # For subclassing if holder needs to be customized
 class PooledFactoryBase(Generic[T, HolderT]):
-    _Holder: ClassVar[Type[HolderT]]  # subclasses must initialize this static attribute
+    _Holder: Type[HolderT]  # subclasses must initialize this static attribute
     __slots__ = ("_pool",)
     _pool: SimplePool[T]
 
@@ -906,28 +906,13 @@ class PooledFactoryBase(Generic[T, HolderT]):
         self._pool.clear()
 
 
-# For directly use
-class PooledFactory(PooledFactoryBase[T, ItemHolderWithSharedPool]):
-    _Holder: ClassVar[Type[ItemHolderWithSharedPool]] = ItemHolderWithSharedPool
-    __slots__ = ()
-
-    def __init__(
-        self,
-        create_func: Callable[[], T],
-        destroy_func: Callable[[T], None],
-        init_size: int = 0,
-        max_cache_size: int | None = None,
-    ):
-        super().__init__(create_func, destroy_func, init_size, max_cache_size)
-
-
 def query_total_gpu_memory() -> int:
-    _, total = _unwrap(drv.cuMemGetInfo())
+    _, total = _unwrap(drv.cuMemGetInfo())  # pyright: ignore
     return total
 
 
 def query_free_gpu_memory() -> int:
-    free, _ = _unwrap(drv.cuMemGetInfo())
+    free, _ = _unwrap(drv.cuMemGetInfo())  # pyright: ignore
     return free
 
 

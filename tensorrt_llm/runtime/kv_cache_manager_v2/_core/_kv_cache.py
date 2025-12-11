@@ -492,7 +492,8 @@ class _KVCache:
     # Resume, migrate buffers to GPU memory.
     def resume(self, cuda_stream: CudaStream | None = None) -> bool:
         assert self.status == self.Status.SUSPENDED
-        if self._storage.overall_utilization > self.manager._init_config.max_util_for_resume:
+        utilization = max(self._storage.get_utilization(GPU_LEVEL))
+        if utilization > self.manager._init_config.max_util_for_resume:
             return False
         if cuda_stream is not None:
             self.cuda_stream = cuda_stream

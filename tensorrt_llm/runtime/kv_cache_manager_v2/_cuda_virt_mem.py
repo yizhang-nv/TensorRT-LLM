@@ -1,4 +1,4 @@
-from typing import ClassVar, Type
+from typing import Type
 
 import cuda.bindings.driver as drv
 
@@ -59,7 +59,7 @@ class PhysMem(ItemHolderWithSharedPool[drv.CUmemGenericAllocationHandle]):
 
 
 class PooledPhysMemAllocator(PooledFactoryBase[drv.CUmemGenericAllocationHandle, PhysMem]):
-    _Holder: ClassVar[Type[PhysMem]] = PhysMem
+    _Holder: Type[PhysMem] = PhysMem
     __slots__ = ("device_id", "phys_mem_size")
     device_id: int
     phys_mem_size: int
