@@ -55,18 +55,19 @@ class NativePhysMemAllocator:
 
 
 class PhysMem(ItemHolderWithSharedPool[drv.CUmemGenericAllocationHandle]):
-    SIZE: ClassVar[int] = 32 << 20
     __slots__ = ()
 
 
 class PooledPhysMemAllocator(PooledFactoryBase[drv.CUmemGenericAllocationHandle, PhysMem]):
     _Holder: ClassVar[Type[PhysMem]] = PhysMem
-    __slots__ = ("device_id",)
+    __slots__ = ("device_id", "phys_mem_size")
     device_id: int
+    phys_mem_size: int
 
-    def __init__(self) -> None:
-        raw_alloc = NativePhysMemAllocator(PhysMem.SIZE)
+    def __init__(self, phys_mem_size: int) -> None:
+        raw_alloc = NativePhysMemAllocator(phys_mem_size)
         self.device_id = raw_alloc.device_id
+        self.phys_mem_size = phys_mem_size
         super().__init__(lambda: raw_alloc.allocate(), lambda handle: raw_alloc.release(handle))
 
 
@@ -82,7 +83,7 @@ class VirtMem:
     def __init__(
         self, vm_size: int, phys_mem_allocator: PooledPhysMemAllocator, init_num_phys_mem: int = 0
     ):
-        assert vm_size % PhysMem.SIZE == 0
+        assert vm_size % phys_mem_allocator.phys_mem_size == 0
         self._allocator = phys_mem_allocator
         device_id = phys_mem_allocator.device_id
         self._address = _unwrap(drv.cuMemAddressReserve(vm_size, 0, 0, 0))
@@ -93,6 +94,10 @@ class VirtMem:
         self._access_desc.location.id = device_id
         self._access_desc.flags = drv.CUmemAccess_flags.CU_MEM_ACCESS_FLAGS_PROT_READWRITE
         self.extend(init_num_phys_mem)
+
+    @property
+    def phys_mem_size(self) -> int:
+        return self._allocator.phys_mem_size
 
     def destroy(self) -> None:
         if self._vm_size == 0:
@@ -124,28 +129,30 @@ class VirtMem:
 
     # Different from normal realloc, this function never changes the pointer.
     def realloc(self, num_bytes: int) -> None:
-        required_num_phys_mem = div_up(num_bytes, PhysMem.SIZE)
+        required_num_phys_mem = div_up(num_bytes, self.phys_mem_size)
         if required_num_phys_mem > self.num_phys_mem:
             self.extend(required_num_phys_mem - self.num_phys_mem)
         elif required_num_phys_mem < self.num_phys_mem:
             self.shrink(self.num_phys_mem - required_num_phys_mem)
 
     def _push(self, phy_mem: PhysMem) -> None:
-        assert PhysMem.SIZE * (len(self._pm_stack) + 1) <= self._vm_size
-        vm_ptr = drv.CUdeviceptr(self.address + PhysMem.SIZE * len(self._pm_stack))
-        _unwrap(drv.cuMemMap(vm_ptr, PhysMem.SIZE, 0, phy_mem.handle, 0))
-        _unwrap(drv.cuMemSetAccess(vm_ptr, PhysMem.SIZE, (self._access_desc,), 1))
+        phys_mem_size = self.phys_mem_size
+        assert phys_mem_size * (len(self._pm_stack) + 1) <= self._vm_size
+        vm_ptr = drv.CUdeviceptr(self.address + phys_mem_size * len(self._pm_stack))
+        _unwrap(drv.cuMemMap(vm_ptr, phys_mem_size, 0, phy_mem.handle, 0))
+        _unwrap(drv.cuMemSetAccess(vm_ptr, phys_mem_size, (self._access_desc,), 1))
         self._pm_stack.append(phy_mem)
 
     def _pop(self) -> PhysMem:
         assert self._pm_stack
-        vm_ptr = drv.CUdeviceptr(self.address + PhysMem.SIZE * (len(self._pm_stack) - 1))
-        _unwrap(drv.cuMemUnmap(vm_ptr, PhysMem.SIZE))
+        phys_mem_size = self.phys_mem_size
+        vm_ptr = drv.CUdeviceptr(self.address + phys_mem_size * (len(self._pm_stack) - 1))
+        _unwrap(drv.cuMemUnmap(vm_ptr, phys_mem_size))
         return self._pm_stack.pop()
 
     @property
     def mapped_bytes(self) -> int:
-        return PhysMem.SIZE * self.num_phys_mem
+        return self.phys_mem_size * self.num_phys_mem
 
     @property
     def virtual_bytes(self) -> int:

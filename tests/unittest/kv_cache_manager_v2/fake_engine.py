@@ -2,19 +2,20 @@ import itertools
 from collections.abc import Sequence
 from functools import cached_property
 from importlib.util import find_spec
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 
-if find_spec("kv_cache_manager_v2") is not None:
+if not TYPE_CHECKING and find_spec("kv_cache_manager_v2") is not None:
     from kv_cache_manager_v2 import (
+        AttentionLayerConfig,
         BeamIndex,
         CudaStream,
+        DataRole,
         KVCacheManagerConfig,
         LayerId,
         TokenIdExt,
         _KVCache,
     )
     from kv_cache_manager_v2._common import BAD_PAGE_INDEX, NDEBUG, MemAddress
-    from kv_cache_manager_v2._config import AttentionLayerConfig, DataRole
     from kv_cache_manager_v2._utils import (
         div_up,
         exact_div,
@@ -25,15 +26,16 @@ if find_spec("kv_cache_manager_v2") is not None:
     )
 else:
     from tensorrt_llm.runtime.kv_cache_manager_v2 import (
+        AttentionLayerConfig,
         BeamIndex,
         CudaStream,
+        DataRole,
         KVCacheManagerConfig,
         LayerId,
         TokenIdExt,
         _KVCache,
     )
     from tensorrt_llm.runtime.kv_cache_manager_v2._common import BAD_PAGE_INDEX, NDEBUG, MemAddress
-    from tensorrt_llm.runtime.kv_cache_manager_v2._config import AttentionLayerConfig, DataRole
     from tensorrt_llm.runtime.kv_cache_manager_v2._utils import (
         div_up,
         exact_div,

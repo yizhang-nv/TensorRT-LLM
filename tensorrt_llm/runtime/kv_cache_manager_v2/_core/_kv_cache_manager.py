@@ -112,7 +112,7 @@ class KVCacheManager:
         raise NotImplementedError("Not implemented")
 
     def get_quota(self, cache_level: CacheLevel) -> int:
-        raise NotImplementedError("Not implemented")
+        return self._storage._levels[cache_level].storage.total_quota
 
     # sorted by CacheLevel from warm to cold
     @property

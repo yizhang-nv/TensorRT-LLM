@@ -9,12 +9,13 @@ from contextlib import contextmanager
 from importlib.util import find_spec
 from random import randbytes
 from statistics import median
-from typing import Iterator, NamedTuple, cast
+from typing import TYPE_CHECKING, Iterator, NamedTuple, cast
 
-if find_spec("kv_cache_manager_v2") is not None:
+if not TYPE_CHECKING and find_spec("kv_cache_manager_v2") is not None:
     from kv_cache_manager_v2 import (
         AttentionLayerConfig,
         BufferConfig,
+        CudaStream,
         DiskCacheTierConfig,
         GpuCacheTierConfig,
         HostCacheTierConfig,
@@ -26,7 +27,7 @@ if find_spec("kv_cache_manager_v2") is not None:
         _KVCache,
     )
     from kv_cache_manager_v2._block_radix_tree import traverse_post_order
-    from kv_cache_manager_v2._common import CudaStream, PageStatus, SlidingWindowSize
+    from kv_cache_manager_v2._common import GPU_LEVEL, PageStatus, SlidingWindowSize
     from kv_cache_manager_v2._exceptions import OutOfPagesError
     from kv_cache_manager_v2._utils import (
         TemporaryCudaStream,
@@ -40,6 +41,7 @@ else:
     from tensorrt_llm.runtime.kv_cache_manager_v2 import (
         AttentionLayerConfig,
         BufferConfig,
+        CudaStream,
         DiskCacheTierConfig,
         GpuCacheTierConfig,
         HostCacheTierConfig,
@@ -52,7 +54,7 @@ else:
     )
     from tensorrt_llm.runtime.kv_cache_manager_v2._block_radix_tree import traverse_post_order
     from tensorrt_llm.runtime.kv_cache_manager_v2._common import (
-        CudaStream,
+        GPU_LEVEL,
         PageStatus,
         SlidingWindowSize,
     )
@@ -281,7 +283,7 @@ class TestNoBatching(TestKVCacheManagerV2):
         lora_task_id = None
         req0 = self.new_request(req_id, lora_task_id, prompt_len, decode_len)
         with TemporaryCudaStream([]) as s:
-            stream = s.handle
+            stream = cast(CudaStream, s.handle)
             kv_cache = req0.kv_cache
             success = kv_cache.resume(stream)
             assert success
@@ -297,7 +299,7 @@ class TestNoBatching(TestKVCacheManagerV2):
         seq_len = 32 * 10
         req0 = self.new_request(0, None, 32, seq_len - 32)
         with TemporaryCudaStream([]) as s:
-            stream = s.handle
+            stream = cast(CudaStream, s.handle)
             kv_cache = req0.kv_cache
             success = kv_cache.resume(stream)
             assert success
@@ -308,6 +310,10 @@ class TestNoBatching(TestKVCacheManagerV2):
                 assert success
         s.take_finish_event()
         kv_cache.close()
+
+    def test_small_quota(self) -> None:
+        self.prepare(5619712, 0, 0, 8, None, 0)
+        assert self.manager.get_quota(GPU_LEVEL) >= 5619712
 
     # @assert_no_ref_cycle
     def test_sol_mem_utilization(self) -> None:

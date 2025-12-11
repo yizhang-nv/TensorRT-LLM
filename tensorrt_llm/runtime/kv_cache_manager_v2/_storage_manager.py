@@ -1,3 +1,4 @@
+import math
 import os
 import warnings
 from dataclasses import dataclass
@@ -46,6 +47,7 @@ from ._utils import (
     map_optional,
     partition,
     remove_if,
+    round_up,
     typed_enumerate,
     typed_range,
 )
@@ -84,19 +86,28 @@ class CacheLevelManager:
         slot_size_lists: Sequence[Sequence[int]],
         init_ratio: Sequence[float],
     ) -> CacheLevelStorage:
+        quota = config.quota
+        num_pools = sum(len(sizes) for sizes in slot_size_lists)
+
+        def adjust_quota(quota: int, granularity: int) -> int:
+            return max(granularity * num_pools, round_up(quota, granularity))
+
         if config.tier == CacheTier.GPU_MEM:
-            return GpuCacheLevelStorage(config.quota, slot_size_lists, init_ratio)
+            page_size = 2 << 20
+            phys_mem_size = page_size << min(4, max(0, int(math.log(quota / (page_size * 512), 2))))
+            quota = adjust_quota(quota, phys_mem_size)
+            return GpuCacheLevelStorage(quota, slot_size_lists, init_ratio, phys_mem_size)
         elif config.tier == CacheTier.HOST_MEM:
-            return HostCacheLevelStorage(config.quota, slot_size_lists, init_ratio)
+            quota = adjust_quota(quota, HostCacheLevelStorage.POOL_SIZE_GRANULARITY)
+            return HostCacheLevelStorage(quota, slot_size_lists, init_ratio)
         elif config.tier == CacheTier.DISK:
             assert isinstance(config, DiskCacheTierConfig)
             assert os.path.isdir(config.path), (
                 f"Disk path {config.path} does not exist or is not a directory"
             )
+            quota = adjust_quota(quota, DiskCacheLevelStorage.POOL_SIZE_GRANULARITY)
             filename_template = os.path.join(config.path, "g{}p{}.bin")
-            return DiskCacheLevelStorage(
-                config.quota, slot_size_lists, init_ratio, filename_template
-            )
+            return DiskCacheLevelStorage(quota, slot_size_lists, init_ratio, filename_template)
         else:
             raise ValueError(f"Invalid cache tier: {config.tier}")
 
