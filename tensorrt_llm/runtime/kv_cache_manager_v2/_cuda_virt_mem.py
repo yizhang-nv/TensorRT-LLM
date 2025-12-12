@@ -13,10 +13,10 @@ class NativePhysMemAllocator:
     _device_id: int
     _size: int
     _prop: drv.CUmemAllocationProp
-    _outstanding_handles: set[int]  # allocated byt not released
+    _outstanding_handles: set[int]  # allocated but not released
 
     def __init__(self, size: int) -> None:
-        self._device_id = int(_unwrap(drv.cuCtxGetDevice()))
+        self._device_id = int(_unwrap(drv.cuCtxGetDevice()))  # pyright: ignore
         self._size = size
         prop = drv.CUmemAllocationProp()
         prop.type = drv.CUmemAllocationType.CU_MEM_ALLOCATION_TYPE_PINNED
@@ -26,8 +26,10 @@ class NativePhysMemAllocator:
         self._outstanding_handles = set()
 
     def allocate(self) -> drv.CUmemGenericAllocationHandle:
-        handle = _unwrap(drv.cuMemCreate(self._size, self._prop, 0))
-        int_handle = int(handle)
+        handle: drv.CUmemGenericAllocationHandle = _unwrap(
+            drv.cuMemCreate(self._size, self._prop, 0)
+        )
+        int_handle = int(handle)  # pyright: ignore
         assert (int_handle not in self._outstanding_handles) and int_handle != 0
         self._outstanding_handles.add(int_handle)
         return handle
