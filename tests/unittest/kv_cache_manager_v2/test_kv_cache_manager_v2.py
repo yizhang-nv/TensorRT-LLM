@@ -642,17 +642,18 @@ class TestBatching(TestKVCacheManagerV2):
             profiler = cProfile.Profile()
             profiler.enable()
         tic = time.perf_counter()
-        with TemporaryCudaStream([]) as stream, enable_kernel_delay():
+        with TemporaryCudaStream([]) as s, enable_kernel_delay():
+            stream = cast(CudaStream, s.handle)
             i = itertools.count()
-            self.update_batch(stream.handle)
+            self.update_batch(stream)
             while self.num_finished < self.num_requests:
                 DBG_PRINT and print(  # type: ignore[arg-type]
                     f"Executing batch {next(i)} with size {len(self.batch)}"
                 )
                 assert self.batch
                 if not skip_execution:
-                    self.engine.execute(self.batch, stream.handle)
-                self.update_batch(stream.handle)
+                    self.engine.execute(self.batch, stream)
+                self.update_batch(stream)
         toc = time.perf_counter()
         if profiler is not None:
             profiler.disable()
@@ -663,7 +664,7 @@ class TestBatching(TestKVCacheManagerV2):
                 f"Time taken: {toc - tic} seconds (num_prompt_tokens: {self.acc_num_prompt_tokens}, "
                 f"num_decode_tokens: {self.acc_num_decode_tokens})"
             )
-        stream.take_finish_event().synchronize()
+        s.take_finish_event().synchronize()
 
 
 class TestDisagg(TestKVCacheManagerV2):
@@ -676,7 +677,7 @@ class TestDisagg(TestKVCacheManagerV2):
         kv_cache = self.manager.create_kv_cache(lora_task_id, prompt)
         assert kv_cache.num_committed_tokens == 0
         with TemporaryCudaStream([]) as stream:
-            success = kv_cache.resume(stream.handle)
+            success = kv_cache.resume(cast(CudaStream, stream.handle))
             assert success
             success = kv_cache.resize(prompt_len, prompt_len)
             assert success

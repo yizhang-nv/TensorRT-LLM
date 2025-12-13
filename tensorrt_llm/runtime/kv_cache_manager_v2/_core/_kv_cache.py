@@ -227,6 +227,8 @@ class _KVCache:
     def set_page_index_buf(
         self, beam_idx: BeamIndex, layer_group_id: LayerGroupId, buf: memoryview
     ) -> None:
+        """Set the buffer for page indices, so we directly update indices in user buffer to
+        avoid user-side copy. This is the zero-copy alternative of get_page_indices()"""
         length = self.num_blocks
         assert buf.ndim == 1 and buf.format == "i" and len(buf) >= length
         buf[:length] = self._page_indices[beam_idx][layer_group_id]

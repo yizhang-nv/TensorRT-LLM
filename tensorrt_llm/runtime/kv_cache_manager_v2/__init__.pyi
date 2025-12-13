@@ -107,14 +107,8 @@ class _Status(enum.Enum):
     SUSPENDED = enum.auto()
     CLOSED = enum.auto()
 
-class _CommitState(enum.Enum):
-    ALLOWED = enum.auto()
-    VIRTUAL_STOP = enum.auto()
-    USER_STOP = enum.auto()
-
 class _KVCache:
     Status: ClassVar[Type[_Status]]
-    CommitState: ClassVar[Type[_CommitState]]
     id: Any
     def __init__(
         self,
