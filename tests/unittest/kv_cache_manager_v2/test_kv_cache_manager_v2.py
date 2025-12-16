@@ -614,6 +614,7 @@ class TestBatching(TestKVCacheManagerV2):
     @parameterized.expand(
         [
             (1000, 1000, 1024, True, 32, 32),
+            (1000, 1000, 1024, True, 1, 32),
             (100, 100, 128, False, 1, 128),
             (100, 100, 128, False, 4, 64),
         ]

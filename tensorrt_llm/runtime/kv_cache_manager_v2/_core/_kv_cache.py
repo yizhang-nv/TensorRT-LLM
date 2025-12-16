@@ -225,15 +225,21 @@ class _KVCache:
         assert NDEBUG or self._check_sanity()
 
     def set_page_index_buf(
-        self, beam_idx: BeamIndex, layer_group_id: LayerGroupId, buf: memoryview
+        self, beam_idx: BeamIndex, layer_group_id: LayerGroupId, buf: memoryview | None
     ) -> None:
         """Set the buffer for page indices, so we directly update indices in user buffer to
         avoid user-side copy. This is the zero-copy alternative of get_page_indices()"""
         length = self.num_blocks
-        assert buf.ndim == 1 and buf.format == "i" and len(buf) >= length
-        buf[:length] = self._page_indices[beam_idx][layer_group_id]
-        buf[length:] = array.array("i", [BAD_PAGE_INDEX]) * (len(buf) - length)
-        self._page_indices[beam_idx][layer_group_id] = buf
+        old_indices = self._page_indices[beam_idx][layer_group_id]
+        new_indices: IndexSeq
+        if buf is None:
+            new_indices = array.array("i", old_indices[:length])
+        else:
+            assert buf.ndim == 1 and buf.format == "i" and len(buf) >= length
+            buf[:length] = old_indices[:length]
+            buf[length:] = array.array("i", [BAD_PAGE_INDEX]) * (len(buf) - length)
+            new_indices = buf
+        self._page_indices[beam_idx][layer_group_id] = new_indices
 
     @property
     def manager(self) -> "KVCacheManager":
@@ -502,6 +508,10 @@ class _KVCache:
         assert self.status == self.Status.ACTIVE
         assert self._check_sanity()
         assert self._finish_event is None
+        for beam_idx, beam_indices in typed_enumerate(self._page_indices):
+            for lc, indices in typed_enumerate(beam_indices):
+                if type(indices) is memoryview:
+                    self.set_page_index_buf(beam_idx, lc, None)
         # used by _SharedPageLock.__del__
         with self._record_event():
             for ordinal, beam_idx, lc_idx in self._active_pages():
