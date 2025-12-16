@@ -112,6 +112,9 @@ class _CommitState(enum.Enum):
     USER_STOP = enum.auto()
 
 
+IndexSeq = array.array[int] | memoryview
+
+
 # The _KVCache holds unique/shared ownership of memory blocks. On deletion, the ownership if destroys
 # and KVCacheManager takes control of them. A KV cache maintains three lengths:
 #  1.	num_committed_tokens: the number of tokens that are finalized, immutable and ready for reuse.
@@ -175,7 +178,7 @@ class _KVCache:
     _blocks: TypedIndexList[BlockOrdinal, SeqBlock]
     # we maintain _page_indices to accelerate the get_page_indices() API. In principle it can be
     # computed on the fly, but that would be slow due to python.
-    _page_indices: TypedIndexList[BeamIndex, TypedIndexList[LifeCycleId, array.array[int]]]
+    _page_indices: TypedIndexList[BeamIndex, TypedIndexList[LifeCycleId, IndexSeq]]
     _committed_tokens: list[TokenIdExt]
     # Sometimes we can't commit a block because all its tokens are already covered by another block in
     # the radix tree. But it's unsafe to just use the other block because: 1. the data may have numeric
@@ -221,6 +224,15 @@ class _KVCache:
             self._setup_for_reuse(input_tokens)
         assert NDEBUG or self._check_sanity()
 
+    def set_page_index_buf(
+        self, beam_idx: BeamIndex, layer_group_id: LayerGroupId, buf: memoryview
+    ) -> None:
+        length = self.num_blocks
+        assert buf.ndim == 1 and buf.format == "i" and len(buf) >= length
+        buf[:length] = self._page_indices[beam_idx][layer_group_id]
+        buf[length:] = array.array("i", [BAD_PAGE_INDEX]) * (len(buf) - length)
+        self._page_indices[beam_idx][layer_group_id] = buf
+
     @property
     def manager(self) -> "KVCacheManager":
         return self._manager
@@ -242,6 +254,10 @@ class _KVCache:
     def finish_event(self) -> CachedCudaEvent:
         "Event recorded when switching from active to suspended/closed state. Unavailable when active."
         return unwrap_optional(self._finish_event)
+
+    @property
+    def num_blocks(self) -> int:
+        return len(self._blocks)
 
     # destroy ownership of memory blocks, so KV cache manager can decide to evict or drop them. After
     # close, uncommitted data in blocks for (beam_index >= beam_width) will be lost.
@@ -274,20 +290,17 @@ class _KVCache:
     # share the same indices, so the output for DataRole.KEY_DATA and DataRole.KEY_BLOCK_SCALE are the same.
     def get_page_indices(
         self, layer_group_id: LayerGroupId, beam_id: BeamIndex = BeamIndex(0)
-    ) -> array.array[int]:
-        ret = self._page_indices[beam_id][layer_group_id]
-        assert NDEBUG or ret == array.array(
-            "i",
-            (
-                value_or(i, BAD_PAGE_INDEX)
-                for i in self._get_page_indices_ref(layer_group_id, beam_id)
-            ),
+    ) -> IndexSeq:
+        indices = self._page_indices[beam_id][layer_group_id]
+        assert NDEBUG or all(
+            v == value_or(r, BAD_PAGE_INDEX)
+            for v, r in zip(indices, self._get_page_indices_ref(layer_group_id, beam_id))
         )
-        return ret
+        return indices
 
     def get_all_page_indices(
         self, beam_id: BeamIndex, buf_ids: Iterable[BufferId]
-    ) -> Iterator[array.array[int]]:
+    ) -> Iterator[IndexSeq]:
         layer_to_lc_ids = self.manager._storage._layer_to_life_cycle_ids
         for layer_id, _ in buf_ids:
             lc = layer_to_lc_ids[layer_id]
@@ -329,7 +342,12 @@ class _KVCache:
             for beam_indices in self._page_indices:
                 for indices in beam_indices:
                     assert all(i == BAD_PAGE_INDEX for i in indices[new_num_blocks:])
-                    del indices[new_num_blocks:]
+                    if type(indices) is array.array:
+                        del indices[new_num_blocks:]
+                    else:
+                        indices[new_num_blocks:] = array.array("i", [BAD_PAGE_INDEX]) * (
+                            len(indices) - new_num_blocks
+                        )
         elif new_num_blocks > old_num_blocks:
             num_new_slots = filled_list(0, num_life_cycles)
             stale_ranges = [
@@ -351,8 +369,11 @@ class _KVCache:
                 return False
             for beam_indices in self._page_indices:
                 for indices in beam_indices:
-                    assert len(indices) == old_num_blocks
-                    indices.extend([BAD_PAGE_INDEX] * (new_num_blocks - old_num_blocks))
+                    if type(indices) is array.array:
+                        assert len(indices) == old_num_blocks
+                        indices.extend([BAD_PAGE_INDEX] * (new_num_blocks - old_num_blocks))
+                    else:
+                        assert len(indices) >= new_num_blocks
             stream_wait_events(self.cuda_stream, (s.ready_event for s in sum(slots, [])))
             for ordinal in typed_range(old_num_blocks, new_num_blocks):
                 block = make_typed(
@@ -492,10 +513,8 @@ class _KVCache:
     # Resume, migrate buffers to GPU memory.
     def resume(self, cuda_stream: CudaStream | None = None) -> bool:
         assert self.status == self.Status.SUSPENDED
-        if self._storage.overall_utilization > self.manager._init_config.max_util_for_resume:
-            print(
-                f"overall_utilization: {self._storage.overall_utilization} > max_util_for_resume: {self.manager._init_config.max_util_for_resume}"
-            )
+        utilization = max(self._storage.get_utilization(GPU_LEVEL))
+        if utilization > self.manager._init_config.max_util_for_resume:
             return False
         if cuda_stream is not None:
             self.cuda_stream = cuda_stream
@@ -509,7 +528,7 @@ class _KVCache:
         try:
             locks = batched_lock_to_gpu(self, tasks)
         except OutOfPagesError:
-            print(f"OutOfPagesError")
+            print("OutOfPagesError")
             return False
         for (ordinal, beam_idx, lc_idx), lock in zip(self._active_pages(), locks):
             beam_block = self._block(ordinal, beam_idx)
@@ -739,9 +758,9 @@ class _KVCache:
     def _check_sanity(self) -> bool:
         is_closed = self.status == self.Status.CLOSED
         if is_closed:
-            return len(self._blocks) == 0
+            return self.num_blocks == 0
         assert self.num_committed_tokens <= self.history_length <= self.capacity
-        assert len(self._blocks) == div_up(self.capacity, self.tokens_per_block)
+        assert self.num_blocks == div_up(self.capacity, self.tokens_per_block)
 
         def get_range(lc: LifeCycle):
             return _KVCache._get_stale_range(self.tokens_per_block, self.history_length, lc)
@@ -936,7 +955,10 @@ class _KVCache:
         self._num_committed_blocks = BlockOrdinal(len(self._committed_tokens) // tokens_per_block)
         for beam_indices in self._page_indices:
             for indices in beam_indices:
-                indices.extend([BAD_PAGE_INDEX] * (len(self._blocks) - len(indices)))
+                if type(indices) is array.array:
+                    indices.extend([BAD_PAGE_INDEX] * (self.num_blocks - len(indices)))
+                else:
+                    assert len(indices) >= self.num_blocks
 
     def _clear_blocks(self) -> None:
         # drop the last block first

@@ -1,6 +1,5 @@
 import abc
 import errno
-import itertools
 import os
 import tempfile
 import warnings
@@ -18,7 +17,7 @@ from .._common import (
     FileDescriptor,
     MemAddress,
 )
-from .._cuda_virt_mem import PhysMem, PooledPhysMemAllocator, VirtMem
+from .._cuda_virt_mem import PooledPhysMemAllocator, VirtMem
 from .._exceptions import LogicError, OutOfPagesError, ResourceBusyError
 from .._utils import (
     CachedCudaEvent,
@@ -86,7 +85,7 @@ class GpuSlotPool(SlotPoolBase):
         num_slots: int,
     ):
         super().__init__(slot_size)
-        assert vm_size % PhysMem.SIZE == 0
+        assert vm_size % shared_phys_mem_pool.phys_mem_size == 0
         self._vm = VirtMem(vm_size, shared_phys_mem_pool)
         self.resize(num_slots)
 
@@ -96,8 +95,10 @@ class GpuSlotPool(SlotPoolBase):
 
     @override
     def resize(self, new_num_slots: int) -> None:
-        new_num_phys_mem = self._compute_num_phys_mem(self.slot_size, new_num_slots)
-        self._vm.realloc(PhysMem.SIZE * new_num_phys_mem)
+        new_num_phys_mem = self._compute_num_phys_mem(
+            self.slot_size, new_num_slots, self._vm.phys_mem_size
+        )
+        self._vm.realloc(self._vm.phys_mem_size * new_num_phys_mem)
 
     def extend_by_one_phys_mem(self) -> int:
         self._vm.extend(1)
@@ -110,15 +111,17 @@ class GpuSlotPool(SlotPoolBase):
     @property
     @override
     def num_slots(self) -> int:
-        return self._compute_num_slots(self.slot_size, self._vm.num_phys_mem)
+        return self._compute_num_slots(
+            self.slot_size, self._vm.num_phys_mem, self._vm.phys_mem_size
+        )
 
     @staticmethod
-    def _compute_num_phys_mem(slot_size: int, num_slots: int) -> int:
-        return div_up(num_slots * slot_size, PhysMem.SIZE)
+    def _compute_num_phys_mem(slot_size: int, num_slots: int, phys_mem_size: int) -> int:
+        return div_up(num_slots * slot_size, phys_mem_size)
 
     @staticmethod
-    def _compute_num_slots(slot_size: int, num_phys_mem: int) -> int:
-        return num_phys_mem * PhysMem.SIZE // slot_size
+    def _compute_num_slots(slot_size: int, num_phys_mem: int, phys_mem_size: int) -> int:
+        return num_phys_mem * phys_mem_size // slot_size
 
 
 class HostSlotPool(SlotPoolBase):
@@ -585,9 +588,12 @@ class PoolGroupBase:
         return min(p.num_slots for p in self._pools)
 
     @staticmethod
-    def _compute_num_phys_mem(slot_size_list: Sequence[int], num_slots: int) -> HomoTuple[int]:
+    def _compute_num_phys_mem(
+        slot_size_list: Sequence[int], num_slots: int, phys_mem_size: int
+    ) -> HomoTuple[int]:
         return tuple(
-            GpuSlotPool._compute_num_phys_mem(slot_size, num_slots) for slot_size in slot_size_list
+            GpuSlotPool._compute_num_phys_mem(slot_size, num_slots, phys_mem_size)
+            for slot_size in slot_size_list
         )
 
 
@@ -603,10 +609,11 @@ class GpuPoolGroup(PoolGroupBase):
         super().__init__(num_slots)
         total_gpu_memory = query_total_gpu_memory()
         max_slot_size = max(slot_size_list)
+        phys_mem_size = shared_phys_mem_pool.phys_mem_size
         self._pools = tuple(
             GpuSlotPool(
                 slot_size,
-                round_down(int(total_gpu_memory * slot_size / max_slot_size), PhysMem.SIZE),
+                round_down(int(total_gpu_memory * slot_size / max_slot_size), phys_mem_size),
                 shared_phys_mem_pool,
                 num_slots,
             )
@@ -634,7 +641,6 @@ class DiskPoolGroup(PoolGroupBase):
 
 
 class CacheLevelStorage:
-    POOL_SIZE_GRANULARITY: ClassVar[int] = 1  # derived class can override this
     TIER: ClassVar[CacheTier]
     __slots__ = ("_total_quota", "_ratio_list", "_pool_groups")
     _total_quota: int  # fixme: remove _total_quota and _ratio_list and compute from _pool_groups
@@ -767,7 +773,7 @@ class CacheLevelStorage:
             f"Wrong ratio_list length. Expected {len(self._pool_groups)}, got {len(ratio_list)}"
         )
         return self._ratio_to_slot_count_list(
-            total_quota, self.slot_size_lists, ratio_list, self.POOL_SIZE_GRANULARITY
+            total_quota, self.slot_size_lists, ratio_list, self.pool_size_granularity
         )
 
     @staticmethod
@@ -775,39 +781,51 @@ class CacheLevelStorage:
         total_quota: int,
         slot_size_lists: Sequence[Sequence[int]],
         ratio_list: Sequence[float],
-        pool_size_granularity: int = 1,
+        pool_size_granularity: int,
     ) -> HomoTuple[int]:
-        sum_ratio = sum(ratio_list)
-        ret = []
+        num_pool_groups = len(ratio_list)
+        assert num_pool_groups == len(slot_size_lists)
+        assert total_quota % pool_size_granularity == 0
+        total_grains = total_quota // pool_size_granularity
+        assert total_grains >= sum(len(sizes) for sizes in slot_size_lists)
+        remaining_grains = total_grains
+        granularity = pool_size_granularity
+        slot_cnt_list = [0] * num_pool_groups
         # divide total_quota into pool groups based on init_ratio, then divide quote for each pool_group
         # into pools based on slot_size.
-        for slot_size_list, ratio in zip(slot_size_lists, ratio_list):
-            pool_group_quota = round_down(
-                int(total_quota * ratio / sum_ratio), pool_size_granularity
-            )
-            num_grains = pool_group_quota // pool_size_granularity
-            sum_slot_size = sum(slot_size_list)
-            num_slots = min(
-                round_down(
-                    int(pool_group_quota * (slot_size / sum_slot_size)), pool_size_granularity
+        pg_idx_lst = sorted(range(len(ratio_list)), key=lambda i: ratio_list[i])
+        for i, pg in enumerate(pg_idx_lst):
+            slot_size_list = slot_size_lists[pg]
+            min_pool_grains = [div_up(s, granularity) for s in slot_size_list]
+            pct: float = ratio_list[pg] / sum(ratio_list[j] for j in pg_idx_lst[i:])
+            pg_grains = max(round(remaining_grains * pct), sum(min_pool_grains))
+            num_slots: int = 1 << 63
+            remaining_pg_grains = pg_grains
+            pool_idx_lst = sorted(range(len(slot_size_list)), key=lambda i: slot_size_list[i])
+            for j, pool in enumerate(pool_idx_lst):
+                slot_size = slot_size_list[pool]
+                pool_grains = max(
+                    min_pool_grains[pool],
+                    round(
+                        remaining_pg_grains
+                        * (slot_size / sum(slot_size_list[k] for k in pool_idx_lst[j:]))
+                    ),
                 )
-                // slot_size
-                for slot_size in slot_size_list
-            )
-            for n in itertools.count(num_slots):
-                if sum(div_up(s * n, pool_size_granularity) for s in slot_size_list) <= num_grains:
-                    num_slots = n
-                else:
-                    break
-            assert num_slots > 0, (
-                f"slot_size_list {slot_size_list} with ratio {ratio} is too small to fit in {total_quota} bytes"
-            )
-            ret.append(num_slots)
-        return tuple(ret)
+                num_slots = min(num_slots, pool_grains * granularity // slot_size)
+                remaining_pg_grains -= pool_grains
+            assert remaining_pg_grains == 0
+            assert num_slots > 0
+            slot_cnt_list[pg] = num_slots
+            remaining_grains -= pg_grains
+        assert remaining_grains == 0
+        return tuple(slot_cnt_list)
+
+    @property
+    def pool_size_granularity(self) -> int:
+        return 2 << 20
 
 
 class GpuCacheLevelStorage(CacheLevelStorage):
-    POOL_SIZE_GRANULARITY: ClassVar[int] = PhysMem.SIZE
     TIER: ClassVar[CacheTier] = CacheTier.GPU_MEM
     __slots__ = ("shared_phys_mem_pool",)
     shared_phys_mem_pool: PooledPhysMemAllocator
@@ -817,15 +835,16 @@ class GpuCacheLevelStorage(CacheLevelStorage):
         total_quota: int,
         slot_size_lists: Sequence[Sequence[int]],
         init_ratio: Sequence[float],
+        phys_mem_size: int,
     ):
         assert len(slot_size_lists) == len(init_ratio), (
             "slot_size_lists and init_ratio must have the same length"
         )
         super().__init__(total_quota, init_ratio)
         slot_count_list = self._ratio_to_slot_count_list(
-            total_quota, slot_size_lists, init_ratio, self.POOL_SIZE_GRANULARITY
+            total_quota, slot_size_lists, init_ratio, phys_mem_size
         )
-        self.shared_phys_mem_pool = PooledPhysMemAllocator()
+        self.shared_phys_mem_pool = PooledPhysMemAllocator(phys_mem_size)
         self._pool_groups = tuple(
             GpuPoolGroup(num_slots, slot_size_list, self.shared_phys_mem_pool)
             for slot_size_list, num_slots in zip(slot_size_lists, slot_count_list)
@@ -838,10 +857,14 @@ class GpuCacheLevelStorage(CacheLevelStorage):
         super().resize(new_total_quota, new_ratio_list)
         self.shared_phys_mem_pool.clear()  # clear cached unused phys mem
 
+    @property
+    def pool_size_granularity(self) -> int:
+        return self.shared_phys_mem_pool.phys_mem_size
+
 
 class HostCacheLevelStorage(CacheLevelStorage):
-    POOL_SIZE_GRANULARITY: ClassVar[int] = HostMem.ALIGNMENT
     TIER: ClassVar[CacheTier] = CacheTier.HOST_MEM
+    POOL_SIZE_GRANULARITY: ClassVar[int] = HostMem.ALIGNMENT
     __slots__ = ()
 
     def __init__(
@@ -852,17 +875,22 @@ class HostCacheLevelStorage(CacheLevelStorage):
     ):
         super().__init__(total_quota, init_ratio)
         slot_count_list = self._ratio_to_slot_count_list(
-            total_quota, slot_size_lists, init_ratio, self.POOL_SIZE_GRANULARITY
+            total_quota, slot_size_lists, init_ratio, self.pool_size_granularity
         )
         self._pool_groups = tuple(
             HostPoolGroup(num_slots, slot_size_list)
             for slot_size_list, num_slots in zip(slot_size_lists, slot_count_list)
         )
 
+    @property
+    def pool_size_granularity(self) -> int:
+        return self.POOL_SIZE_GRANULARITY
+
 
 class DiskCacheLevelStorage(CacheLevelStorage):
     __slots__ = ()
     TIER: ClassVar[CacheTier] = CacheTier.DISK
+    POOL_SIZE_GRANULARITY: ClassVar[int] = 2 << 20
 
     def __init__(
         self,
@@ -873,7 +901,7 @@ class DiskCacheLevelStorage(CacheLevelStorage):
     ):
         super().__init__(total_quota, init_ratio)
         slot_count_list = self._ratio_to_slot_count_list(
-            total_quota, slot_size_lists, init_ratio, self.POOL_SIZE_GRANULARITY
+            total_quota, slot_size_lists, init_ratio, self.pool_size_granularity
         )
         self._pool_groups = tuple(
             DiskPoolGroup(num_slots, slot_size_list, filename_template.format(pg_idx, "{}"))
@@ -881,3 +909,7 @@ class DiskCacheLevelStorage(CacheLevelStorage):
                 zip(slot_size_lists, slot_count_list)
             )
         )
+
+    @property
+    def pool_size_granularity(self) -> int:
+        return self.POOL_SIZE_GRANULARITY

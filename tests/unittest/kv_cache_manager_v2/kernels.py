@@ -3,23 +3,21 @@ import ctypes
 from collections.abc import Sequence
 from functools import lru_cache
 from importlib.util import find_spec
-from typing import Final, Iterator
+from typing import TYPE_CHECKING, Iterator
 
 import cuda.bindings.driver as drv
 from cuda.core.experimental import Kernel, Program, ProgramOptions
 from cuda.core.experimental._module import ObjectCode
-<<<<<<<< HEAD:tests/unittest/kv_cache_manager_v2/kernels.py
-========
 
-from tensorrt_llm.runtime.kv_cache_manager_v2._common import (CudaStream,
-                                                              LayerId,
-                                                              MemAddress,
-                                                              TokenIdExt)
-from tensorrt_llm.runtime.kv_cache_manager_v2._utils import (_unwrap, div_up,
-                                                             exact_div) 
->>>>>>>> 93114cf94 (Init):tests/aa/kernels.py
+from tensorrt_llm.runtime.kv_cache_manager_v2._common import (
+    CudaStream,
+    LayerId,
+    MemAddress,
+    TokenIdExt,
+)
+from tensorrt_llm.runtime.kv_cache_manager_v2._utils import _unwrap, div_up, exact_div
 
-if find_spec("kv_cache_manager_v2") is not None:
+if not TYPE_CHECKING and find_spec("kv_cache_manager_v2") is not None:
     from kv_cache_manager_v2._common import CudaStream, LayerId, MemAddress, TokenIdExt
     from kv_cache_manager_v2._utils import _unwrap, div_up, exact_div
 else:
@@ -31,7 +29,7 @@ else:
     )
     from tensorrt_llm.runtime.kv_cache_manager_v2._utils import _unwrap, div_up, exact_div
 
-_SLEEP_TIME_NS: Final[int] = 0
+_SLEEP_TIME_NS: int = 0
 
 
 @contextlib.contextmanager
