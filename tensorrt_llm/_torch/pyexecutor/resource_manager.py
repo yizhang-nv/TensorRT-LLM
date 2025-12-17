@@ -3,8 +3,8 @@ import enum
 import math
 from abc import ABC, abstractmethod
 from collections import OrderedDict, defaultdict, deque
-from typing import (TYPE_CHECKING, Dict, Iterable, List, Optional, Set, Tuple,
-                    Union)
+from typing import (TYPE_CHECKING, Dict, Iterable, List, Optional, Sequence,
+                    Set, Tuple, Union)
 
 import numpy as np
 import torch
@@ -14,6 +14,8 @@ import tensorrt_llm.bindings
 from tensorrt_llm._utils import (TensorWrapper, convert_to_torch_tensor,
                                  get_size_in_bytes, mpi_disabled)
 from tensorrt_llm.bindings.BuildInfo import ENABLE_MULTI_DEVICE
+from tensorrt_llm.bindings.internal.batch_manager.kv_cache_manager_v2_utils import (
+    IndexMapper, copy_batch_block_offsets_to_device)
 from tensorrt_llm.llmapi.llm_args import (KvCacheConfig, PeftCacheConfig,
                                           PybindMirror)
 from tensorrt_llm.lora_helper import LoraConfig
@@ -28,7 +30,8 @@ from tensorrt_llm.runtime.kv_cache_manager_v2 import \
     KVCacheManager as KVCacheManagerPy
 from tensorrt_llm.runtime.kv_cache_manager_v2 import \
     KVCacheManagerConfig as KVCacheManagerConfigPy
-from tensorrt_llm.runtime.kv_cache_manager_v2 import LayerId, _KVCache
+from tensorrt_llm.runtime.kv_cache_manager_v2 import (LayerId, TokenIdExt,
+                                                      _KVCache)
 from tensorrt_llm.runtime.kv_cache_manager_v2._config import DataRole
 from tensorrt_llm.runtime.kv_cache_manager_v2._copy_engine import \
     copy_batch_block_offsets as copy_batch_block_offsets_nanobind
@@ -419,6 +422,14 @@ class KVCacheManager(BaseResourceManager):
         self.num_pools = self.impl.num_pools
         self.max_blocks_per_seq = self.impl.max_blocks_per_seq
         self.enable_block_reuse = kv_cache_config.enable_block_reuse
+        self.host_kv_cache_block_offsets = torch.empty(self.num_pools,
+                                                       max_batch_size *
+                                                       max_beam_width,
+                                                       2,
+                                                       self.max_blocks_per_seq,
+                                                       dtype=torch.int32,
+                                                       pin_memory=True,
+                                                       device='cpu')
 
     def shutdown(self):
         self.impl.release_pools()
@@ -1240,9 +1251,15 @@ class KVCacheManager(BaseResourceManager):
     @nvtx_range("copy_batch_block_offsets")
     def copy_batch_block_offsets(self, dst_tensor: torch.Tensor,
                                  request_ids: List[int], beam_width: int,
-                                 offset: int):
-        self.impl.copy_batch_block_offsets(dst_tensor, request_ids, beam_width,
-                                           offset)
+                                 num_context: int, num_gen: int):
+        num_seqs = num_context + num_gen * beam_width
+        self.impl.copy_batch_block_offsets(self.host_kv_cache_block_offsets,
+                                           request_ids[0:num_context], 1, 0)
+        self.impl.copy_batch_block_offsets(self.host_kv_cache_block_offsets,
+                                           request_ids[num_context:],
+                                           beam_width, num_context)
+        dst_tensor[:, :num_seqs].copy_(
+            self.host_kv_cache_block_offsets[:, :num_seqs], non_blocking=True)
 
     def reset_reuse_state(self):
         """Reset the reuse state of the KV cache manager."""
@@ -1296,6 +1313,7 @@ class KVCacheManagerV2(BaseResourceManager):
             idx: offset
             for offset, idx in enumerate(self.pp_layers)
         }
+        self.max_beam_width = max_beam_width
 
         tp_size = mapping.tp_size
         if mapping.enable_attention_dp:
@@ -1470,8 +1488,11 @@ class KVCacheManagerV2(BaseResourceManager):
                                                   dtype=torch.int32,
                                                   device="cpu",
                                                   pin_memory=True)
+        # Pad max_blocks_per_seq to next multiple of 4 for copy_block_offsets kernel
         self.max_blocks_per_seq = (max_seq_len + tokens_per_block -
                                    1) // tokens_per_block
+        if self.max_blocks_per_seq % 4 != 0:
+            self.max_blocks_per_seq = ((self.max_blocks_per_seq + 3) // 4) * 4
 
         self.kv_cache_map: dict[int, _KVCache] = {}
 
@@ -1484,6 +1505,21 @@ class KVCacheManagerV2(BaseResourceManager):
             self.max_seq_len = max_num_tokens
 
         self.enable_block_reuse = kv_cache_config.enable_block_reuse
+
+        self.index_mapper = IndexMapper(max_batch_size, max_beam_width)
+
+        self.host_kv_cache_block_offsets = torch.empty(
+            self.num_pools,
+            max_batch_size * max_beam_width,
+            2,  # key and value
+            self.max_blocks_per_seq,
+            dtype=torch.int32,
+            pin_memory=True,
+            device='cpu')
+        import os
+
+        # V2 is using zero copy api for index copy. By default we use zero copy api.
+        self.index_copy_v1 = os.environ.get("INDEX_COPY_V1", "0") == "1"
 
     @property
     def blocks_in_primary_pool(self) -> int:
@@ -1560,13 +1596,11 @@ class KVCacheManagerV2(BaseResourceManager):
                     if req.is_first_context_chunk and self._kv_connector_should_add_sequence(
                             req):
                         # Last token cannot be recovered, so we don't include it in the input tokens to look up for the block that can be reused.
-                        kv_cache = self.impl.create_kv_cache(
-                            req.lora_task_id,
+                        kv_cache = self._create_kv_cache(
+                            req.py_request_id, req.lora_task_id,
                             req.get_tokens(0)[:-1]
                             if self.enable_block_reuse else None)
                         assert beam_width == 1, "Currently, KVCacheManagerV2 only supports beam width 1"
-                        assert req.py_request_id not in self.kv_cache_map, f"req.py_request_id {req.py_request_id} already in kv_cache_map"
-                        self.kv_cache_map[req.py_request_id] = kv_cache
                         if not self.enable_block_reuse:
                             assert kv_cache.num_committed_tokens == 0
                             kv_cache.stop_committing()
@@ -1661,8 +1695,8 @@ class KVCacheManagerV2(BaseResourceManager):
             req.is_dummy_request = True
             req.paged_kv_block_ids = []
             if prepare_resource:
-                kv_cache = self.impl.create_kv_cache(req.lora_task_id,
-                                                     input_tokens)
+                kv_cache = self._create_kv_cache(req.py_request_id,
+                                                 req.lora_task_id, input_tokens)
                 assert kv_cache.num_committed_tokens == 0
                 success = kv_cache.resume(
                     torch.cuda.current_stream().cuda_stream)
@@ -1673,7 +1707,6 @@ class KVCacheManagerV2(BaseResourceManager):
                     return None
                 kv_cache.stop_committing()
                 kv_cache.capacity = token_num
-                self.kv_cache_map[req_id] = kv_cache
 
             if is_gen:
                 req.state = LlmRequestState.GENERATION_IN_PROGRESS
@@ -1701,6 +1734,9 @@ class KVCacheManagerV2(BaseResourceManager):
     def free_resources(self, request: LlmRequest, pin_on_release: bool = False):
         kv_cache = self.kv_cache_map.pop(request.py_request_id)
         kv_cache.close()
+        if self.index_copy_v1:
+            return
+        self.index_mapper.remove_sequence(request.py_request_id)
 
     def get_batch_cache_indices(
             self,
@@ -1881,21 +1917,67 @@ class KVCacheManagerV2(BaseResourceManager):
     @nvtx_range("copy_batch_block_offsets")
     def copy_batch_block_offsets(self, dst_tensor: torch.Tensor,
                                  request_ids: List[int], beam_width: int,
-                                 offset: int):
+                                 num_contexts: int, num_gen: int):
+        if self.index_copy_v1:
+            self.copy_batch_block_offsets_v1(dst_tensor, request_ids,
+                                             beam_width, num_contexts, num_gen)
+        else:
+            self.copy_batch_block_offsets_v2(dst_tensor, request_ids,
+                                             beam_width, num_contexts, num_gen)
+
+    @nvtx_range("copy_batch_block_offsets_v2")
+    def copy_batch_block_offsets_v2(self, dst_tensor: torch.Tensor,
+                                    request_ids: List[int], beam_width: int,
+                                    num_contexts: int, num_gen: int):
+        assert beam_width == 1, "beam_width must be 1 for KVCacheManagerV2"
+
+        assert num_contexts + num_gen == len(
+            request_ids
+        ), "num_contexts + num_gen must be equal to the length of request_ids"
+        copy_idx = self.index_mapper.get_copy_index(request_ids, num_contexts,
+                                                    beam_width)
+
+        copy_batch_block_offsets_to_device(
+            self.host_kv_cache_block_offsets, dst_tensor, copy_idx, True,
+            torch.cuda.current_stream().cuda_stream)
+
+    def copy_batch_block_offsets_v1(self, dst_tensor: torch.Tensor,
+                                    request_ids: List[int], beam_width: int,
+                                    num_contexts: int, num_gen: int):
         assert beam_width == 1, "beam_width must be 1 for KVCacheManager"
 
-        batch_cache_indices = []
+        num_seqs = num_contexts + num_gen * beam_width
 
-        for pool_idx in range(self.num_pools):
-            for req_id in request_ids:
-                batch_cache_indices.append(
-                    self.kv_cache_map[req_id].get_page_indices(
-                        pool_idx).buffer_info())
+        for offset, end in [(0, num_contexts), (num_contexts, num_seqs)]:
+            batch_cache_indices = []
+            for pool_idx in range(self.num_pools):
+                for req_id in request_ids[offset:end]:
+                    batch_cache_indices.append(
+                        self.kv_cache_map[req_id].get_page_indices(
+                            pool_idx, 0).buffer_info())
+            if len(batch_cache_indices) > 0:
+                copy_batch_block_offsets_nanobind(
+                    self.host_kv_cache_block_offsets, end - offset,
+                    batch_cache_indices, self.num_pools, offset)
 
-        if len(batch_cache_indices) > 0:
-            copy_batch_block_offsets_nanobind(dst_tensor, len(request_ids),
-                                              batch_cache_indices,
-                                              self.num_pools, offset)
+        dst_tensor[:, :num_seqs].copy_(
+            self.host_kv_cache_block_offsets[:, :num_seqs], non_blocking=True)
+
+    def _create_kv_cache(self, request_id: int, lora_task_id: int,
+                         input_tokens: Sequence[TokenIdExt]):
+        assert request_id not in self.kv_cache_map, f"KV cache for request {request_id} already exists"
+        kv_cache = self.impl.create_kv_cache(lora_task_id, input_tokens)
+        self.kv_cache_map[request_id] = kv_cache
+        if self.index_copy_v1:
+            return kv_cache
+        index = self.index_mapper.add_new_sequence(request_id)
+        for i in range(self.max_beam_width):
+            for pool_idx in range(self.num_pools):
+                buffer: torch.Tensor = self.host_kv_cache_block_offsets[
+                    pool_idx, index * self.max_beam_width + i, 0]
+                kv_cache.set_page_index_buf(i, pool_idx,
+                                            memoryview(buffer.numpy()))
+        return kv_cache
 
 
 class SlotManager:

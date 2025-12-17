@@ -1479,6 +1479,9 @@ class PyExecutor:
                         iter_stats=iter_stats,
                         ctx_transmission_reqs=ctx_transmission_reqs)
 
+                else:
+                    self.previous_batch = None
+
                 if self.kv_cache_transceiver and self.ctx_in_transmission_requests:
                     self._check_kv_transfer_timeout()
                     self._terminate_disagg_ctx_finished_requests()

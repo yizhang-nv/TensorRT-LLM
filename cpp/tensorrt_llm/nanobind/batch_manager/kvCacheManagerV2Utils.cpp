@@ -76,6 +76,13 @@ void KVCacheManagerV2UtilsBindings::initBindings(nb::module_& module)
         .def_rw("addr", &BlockIndices::addr)
         .def_rw("length", &BlockIndices::length);
 
+    nb::class_<IndexMapper>(module, "IndexMapper")
+        .def(nb::init<SizeType32, SizeType32>(), nb::arg("max_batch_size"), nb::arg("max_beam_width"))
+        .def("add_new_sequence", &IndexMapper::addNewSequence)
+        .def("get_index", &IndexMapper::getIndex)
+        .def("remove_sequence", &IndexMapper::removeSequence)
+        .def("get_copy_index", &IndexMapper::getCopyIndex);
+
     // Bind copy functions
     module.def(
         "copy_disk_to_disk",
@@ -137,6 +144,22 @@ void KVCacheManagerV2UtilsBindings::initBindings(nb::module_& module)
         },
         nb::arg("output"), nb::arg("batch_size"), nb::arg("batch_block_indices"), nb::arg("num_pools"),
         nb::arg("offset"), nb::call_guard<nb::gil_scoped_release>(), "Copy batch block indices to output tensor");
+
+    module.def(
+        "copy_batch_block_offsets_to_device",
+        [](at::Tensor input, at::Tensor output, at::Tensor copyIndex, bool copyVIdx, uintptr_t stream)
+        {
+            auto _input = from_torch(input);
+            auto _output = from_torch(output);
+            auto _copyIndex = from_torch(copyIndex);
+            TLLM_CHECK_WITH_INFO(_input.has_value(), "Invalid input tensor.");
+            TLLM_CHECK_WITH_INFO(_output.has_value(), "Invalid output tensor.");
+            TLLM_CHECK_WITH_INFO(_copyIndex.has_value(), "Invalid copy index tensor.");
+            copyBatchBlockOffsetsToDevice(*(_input.value()), *(_output.value()), *(_copyIndex.value()), copyVIdx,
+                reinterpret_cast<CUstream>(stream));
+        },
+        nb::arg("input"), nb::arg("output"), nb::arg("copy_index"), nb::arg("copy_v_idx"), nb::arg("stream"),
+        nb::call_guard<nb::gil_scoped_release>(), "Copy batch block indices to device");
 }
 
 } // namespace tensorrt_llm::batch_manager::kv_cache_manager_v2
