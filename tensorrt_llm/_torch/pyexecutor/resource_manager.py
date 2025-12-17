@@ -14,7 +14,8 @@ import tensorrt_llm.bindings
 from tensorrt_llm._utils import (TensorWrapper, convert_to_torch_tensor,
                                  get_size_in_bytes, mpi_disabled)
 from tensorrt_llm.bindings.BuildInfo import ENABLE_MULTI_DEVICE
-from tensorrt_llm.llmapi.llm_args import (KvCacheConfig, PeftCacheConfig,
+from tensorrt_llm.llmapi.llm_args import (CapacitySchedulerPolicy,
+                                          KvCacheConfig, PeftCacheConfig,
                                           PybindMirror)
 from tensorrt_llm.lora_helper import LoraConfig
 from tensorrt_llm.lora_manager import LoraManager, LoraModelConfig
@@ -1274,10 +1275,13 @@ class KVCacheManagerV2(BaseResourceManager):
         max_beam_width: int = 1,
         is_draft: bool = False,
         kv_connector_manager: Optional[KvCacheConnectorManager] = None,
+        capacity_scheduler_policy:
+        CapacitySchedulerPolicy = CapacitySchedulerPolicy.GUARANTEED_NO_EVICT,
         **kwargs,
     ) -> None:
         self.mapping = mapping
         self.dtype = dtype
+        self.capacity_scheduler_policy = capacity_scheduler_policy
 
         assert self.dtype != DataType.NVFP4, "NVFP4 is not supported for KVCacheManagerV2"
         assert kv_connector_manager is None, "kv_connector_manager is not supported for KVCacheManagerV2"
@@ -1545,6 +1549,16 @@ class KVCacheManagerV2(BaseResourceManager):
 
     @nvtx_range("prepare_resources_kv_cache_manager_v2")
     def prepare_resources(self, scheduled_batch: ScheduledRequests):
+        """Unified prepare_resources that dispatches based on capacity_scheduler_policy."""
+        if self.capacity_scheduler_policy == CapacitySchedulerPolicy.MAX_UTILIZATION:
+            pass
+        else:
+            # Default to GUARANTEED_NO_EVICT
+            self._prepare_resources_guaranteed_no_evict(scheduled_batch)
+
+    @nvtx_range("prepare_resources_kv_cache_manager_v2_guaranteed_no_evict")
+    def _prepare_resources_guaranteed_no_evict(
+            self, scheduled_batch: ScheduledRequests):
         with request_context(self.is_draft, scheduled_batch):
             context_batch = scheduled_batch.context_requests
             generation_batch = scheduled_batch.generation_requests
@@ -1699,8 +1713,9 @@ class KVCacheManagerV2(BaseResourceManager):
         return requests
 
     def free_resources(self, request: LlmRequest, pin_on_release: bool = False):
-        kv_cache = self.kv_cache_map.pop(request.py_request_id)
-        kv_cache.close()
+        if request.py_request_id in self.kv_cache_map:
+            kv_cache = self.kv_cache_map.pop(request.py_request_id)
+            kv_cache.close()
 
     def get_batch_cache_indices(
             self,
@@ -1865,9 +1880,15 @@ class KVCacheManagerV2(BaseResourceManager):
             kv_cache = self.kv_cache_map[req.py_request_id]
             if self.enable_block_reuse and not req.is_dummy_request:
                 if req.context_current_position > kv_cache.num_committed_tokens:
-                    kv_cache.commit(
-                        req.get_tokens(0)[kv_cache.num_committed_tokens:req.
-                                          context_current_position])
+                    try:
+                        kv_cache.commit(
+                            req.get_tokens(0)[kv_cache.num_committed_tokens:req.
+                                              context_current_position])
+                    except Exception as e:
+                        logger.warning(
+                            f"Error committing tokens for request {req.py_request_id if hasattr(req, 'py_request_id') else req.request_id}: {e}"
+                        )
+                        continue
                 kv_cache.stop_committing()
             else:
                 kv_cache.history_length = req.context_current_position
