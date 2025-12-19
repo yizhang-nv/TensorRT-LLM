@@ -12,15 +12,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import glob
 import os
 import platform
-import shutil
 from pathlib import Path
 from typing import List
 
-from setuptools import Extension, find_packages, setup
-from setuptools.command.build_ext import build_ext
+from setuptools import find_packages, setup
 from setuptools.dist import Distribution
 
 
@@ -93,33 +90,6 @@ class BinaryDistribution(Distribution):
 
     def has_ext_modules(self):
         return True
-
-
-# Custom extension handling to include prebuilt shared libraries at the top level of the wheel
-class PrebuiltExtension(Extension):
-
-    def __init__(self, name, source):
-        self.source = source
-        super().__init__(name, sources=[])
-
-
-class CopyPrebuiltExt(build_ext):
-
-    def build_extension(self, ext):
-        if isinstance(ext, PrebuiltExtension):
-            # Calculate the target path for the extension
-            fullname = self.get_ext_fullname(ext.name)
-            filename = self.get_ext_filename(fullname)
-            target = os.path.join(self.build_lib, filename)
-
-            # Ensure target directory exists
-            os.makedirs(os.path.dirname(target), exist_ok=True)
-
-            # Copy the prebuilt file
-            print(f"Copying prebuilt extension {ext.source} to {target}")
-            shutil.copy(ext.source, target)
-        else:
-            super().build_extension(ext)
 
 
 on_windows = platform.system() == "Windows"
@@ -311,24 +281,32 @@ with open("README.md", "r", encoding="utf-8") as fh:
     # We exclude the kv_cache_manager_v2 package entirely from the source list,
     # but explicitly add back the rawref subpackage (which is not compiled by mypyc).
     # The .so and .pyi files for kv_cache_manager_v2 are added via package_data.
-packages = find_packages(exclude=[
-    "tensorrt_llm.runtime.kv_cache_manager_v2",
-    "tensorrt_llm.runtime.kv_cache_manager_v2.*",
-]) + ["tensorrt_llm.runtime.kv_cache_manager_v2.rawref"]
-exclude_package_data = {
-    "tensorrt_llm":
-    ["runtime/kv_cache_manager_v2/*.py", "runtime/kv_cache_manager_v2/**/*.py"],
-    "tensorrt_llm.runtime.kv_cache_manager_v2": ["*.py", "**/*.py"],
-}
+enable_mypyc = os.getenv("TRTLLM_ENABLE_MYPYC", "0") == "1"
+if enable_mypyc:
+    packages = find_packages(exclude=[
+        "tensorrt_llm.runtime.kv_cache_manager_v2",
+        "tensorrt_llm.runtime.kv_cache_manager_v2.*",
+    ]) + ["tensorrt_llm.runtime.kv_cache_manager_v2.rawref"]
+    exclude_package_data = {
+        "tensorrt_llm": [
+            "runtime/kv_cache_manager_v2/*.py",
+            "runtime/kv_cache_manager_v2/**/*.py"
+        ],
+        "tensorrt_llm.runtime.kv_cache_manager_v2": ["*.py", "**/*.py"],
+    }
+else:
+    packages = find_packages()
+    exclude_package_data = {}
 
-# Find the prebuilt mypyc shared object in the root directory
-mypyc_ext_modules = []
-mypyc_so_files = glob.glob("*__mypyc*.so")
-if mypyc_so_files:
-    for so_file in mypyc_so_files:
-        # Extract module name from filename (e.g. 52...__mypyc from 52...__mypyc.cpython-312....so)
-        module_name = so_file.split('.')[0]
-        mypyc_ext_modules.append(PrebuiltExtension(module_name, so_file))
+    # Remove mypyc shared objects from package_data to avoid packaging stale files
+    package_data = [
+        p for p in package_data if p not in [
+            'runtime/kv_cache_manager_v2/*.so',
+            'runtime/kv_cache_manager_v2/**/*.so', 'runtime/*__mypyc*.so'
+        ]
+    ]
+    # Ensure rawref is included
+    package_data.append('runtime/kv_cache_manager_v2/rawref/*.so')
 
 # https://setuptools.pypa.io/en/latest/references/keywords.html
 setup(
@@ -345,8 +323,6 @@ setup(
     download_url="https://github.com/NVIDIA/TensorRT-LLM/tags",
     packages=packages,
     exclude_package_data=exclude_package_data,
-    ext_modules=mypyc_ext_modules,
-    cmdclass={'build_ext': CopyPrebuiltExt},
     # TODO Add windows support for python bindings.
     classifiers=[
         "Development Status :: 4 - Beta",
