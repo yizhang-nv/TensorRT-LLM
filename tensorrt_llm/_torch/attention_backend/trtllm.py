@@ -726,7 +726,6 @@ class TrtllmAttentionMetadata(AttentionMetadata):
                 capture_graph=capture_graph,
             )
             self.host_kv_cache_block_offsets = self.kv_cache_manager.host_kv_cache_block_offsets
-            assert self.host_kv_cache_block_offsets.shape == self.kv_cache_block_offsets.shape, f"host_kv_cache_block_offsets and kv_cache_block_offsets should have the same shape, but got {self.host_kv_cache_block_offsets.shape} and {self.kv_cache_block_offsets.shape}"
             self.block_ids_per_seq = None
             self.kv_block_ids_per_seq = None
             if self.enable_flash_mla:
