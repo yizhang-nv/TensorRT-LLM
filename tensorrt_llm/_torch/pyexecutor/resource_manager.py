@@ -1920,7 +1920,8 @@ class KVCacheManagerV2(BaseResourceManager):
                                                     beam_width)
 
         copy_batch_block_offsets_to_device(
-            self.host_kv_cache_block_offsets, dst_tensor, copy_idx, True,
+            self.host_kv_cache_block_offsets, dst_tensor, copy_idx,
+            self.kv_cache_type == CacheTypeCpp.SELFKONLY,
             torch.cuda.current_stream().cuda_stream)
 
     def _create_kv_cache(self, request_id: int, lora_task_id: int,

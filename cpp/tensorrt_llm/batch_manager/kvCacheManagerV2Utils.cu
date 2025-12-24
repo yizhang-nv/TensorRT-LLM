@@ -210,6 +210,10 @@ __global__ void copyBatchBlockOffsetsToDeviceKernel(SizeType32 const* __restrict
                 dstK = src;
                 if (COPY_V_IDX)
                 {
+                    dstV = src;
+                }
+                else
+                {
 #pragma unroll
                     for (uint32_t j = 0; j < elemPerAccess; j++)
                     {
@@ -231,9 +235,6 @@ __global__ void copyBatchBlockOffsetsToDeviceKernel(SizeType32 const* __restrict
         }
         asm volatile("cp.async.commit_group;\n" : : : "memory");
     }
-#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
-    cudaTriggerProgrammaticLaunchCompletion();
-#endif
 }
 
 // Host-side launcher
