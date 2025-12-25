@@ -478,6 +478,38 @@ def build_kv_cache_manager_v2(project_dir, venv_python, use_mypyc=False):
             )
 
 
+def build_sampling_helper_func(project_dir, venv_python, use_mypyc=False):
+    print("-- Building sampling_helper_func...")
+    sampling_helper_func_dir = project_dir / "tensorrt_llm/_torch/pyexecutor/sampling_helper_func"
+    py_executor_dir = project_dir / "tensorrt_llm/_torch/pyexecutor"
+
+    # Clean up any existing mypyc artifacts in runtime directory to prevent stale inclusion
+    # when switching from --mypyc to standard build
+    if not use_mypyc:
+        for so_file in py_executor_dir.glob("*__mypyc*.so"):
+            print(f"Removing stale mypyc artifact: {so_file}")
+            so_file.unlink()
+
+        # Also clean up any .so files inside sampling_helper_func
+        for so_file in sampling_helper_func_dir.rglob("*.so"):
+            print(f"Removing stale artifact: {so_file}")
+            so_file.unlink()
+
+    else:
+        # Build mypyc
+        print("-- Building sampling_helper_func mypyc extensions...")
+        # setup_mypyc.py is in sampling_helper_func but executed from py_executor dir
+        setup_mypyc = sampling_helper_func_dir / "setup_mypyc.py"
+        build_run(f'"{venv_python}" "{setup_mypyc}" build_ext --inplace',
+                  cwd=py_executor_dir)
+
+        # Verify that the shared library was generated
+        if not list(py_executor_dir.glob("*__mypyc*.so")):
+            raise RuntimeError(
+                "Failed to build sampling_helper_func: no shared library generated."
+            )
+
+
 def main(*,
          build_type: str = "Release",
          generator: str = "",
@@ -968,6 +1000,7 @@ def main(*,
                         binding_lib_file_name)
 
     build_kv_cache_manager_v2(project_dir, venv_python, use_mypyc=mypyc)
+    build_sampling_helper_func(project_dir, venv_python, use_mypyc=mypyc)
 
     if not skip_building_wheel:
         if dist_dir is None:

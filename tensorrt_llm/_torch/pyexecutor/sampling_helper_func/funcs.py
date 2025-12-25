@@ -23,7 +23,7 @@ else:
 T = TypeVar("T")
 
 
-def resolve_sampling_strategy_impl(params: UtilsSamplingParams, *, vocab_size: int) -> Strategy:
+def resolve_sampling_strategy(params: UtilsSamplingParams, *, vocab_size: int) -> Strategy:
     # The semantics are specified in the doc-string of SamplingParams
 
     temperature = params.temperature
@@ -71,7 +71,7 @@ def _unwrap_singleton(p: Optional[list[T]]) -> Optional[T]:
     return t
 
 
-def _request_get_sampling_params_impl(request: LlmRequest) -> UtilsSamplingParams:
+def _request_get_sampling_params(request: LlmRequest) -> UtilsSamplingParams:
     sampling_config = request.sampling_config
     temperature = _unwrap_singleton(cast(Optional[list[float]], sampling_config.temperature))
     top_p = _unwrap_singleton(cast(Optional[list[float]], sampling_config.top_p))
@@ -84,23 +84,23 @@ def _request_get_sampling_params_impl(request: LlmRequest) -> UtilsSamplingParam
     )
 
 
-def _request_strategy_impl(request: LlmRequest, *, vocab_size: int) -> Strategy:
-    params = _request_get_sampling_params_impl(request)
-    return resolve_sampling_strategy_impl(params, vocab_size=vocab_size)
+def _request_strategy(request: LlmRequest, *, vocab_size: int) -> Strategy:
+    params = _request_get_sampling_params(request)
+    return resolve_sampling_strategy(params, vocab_size=vocab_size)
 
 
-def _speculation_could_use_rejection_sampling_impl(
+def _speculation_could_use_rejection_sampling(
     request: LlmRequest, strategy: Optional[Strategy] = None
 ) -> bool:
     if strategy is None:
-        strategy = _request_strategy_impl(
+        strategy = _request_strategy(
             request,
             vocab_size=2**31,  # vocab_size does not affect greediness
         )
     return get_draft_token_length(request) > 0 and strategy != GREEDY
 
 
-def _group_requests_by_strategy_key_impl(
+def _group_requests_by_strategy_key(
     requests: Iterable[LlmRequest],
     *,
     strategy_to_key: Callable[[Strategy, bool], GenericStrategyKeyType],
@@ -113,11 +113,11 @@ def _group_requests_by_strategy_key_impl(
     )
 
     for req_index, req in enumerate(requests):
-        strategy = _request_strategy_impl(req, vocab_size=vocab_size)
+        strategy = _request_strategy(req, vocab_size=vocab_size)
         speculation_needs_probs = (
             # NB: This criterion needs to be consistent with the gating of rejection sampling in
             #     process_draft_tokens.
-            _speculation_could_use_rejection_sampling_impl(req, strategy)
+            _speculation_could_use_rejection_sampling(req, strategy)
         )
         strategy_key = strategy_to_key(strategy, speculation_needs_probs)
         group_dict_entry = group_dict[(strategy_key, speculation_needs_probs)]
@@ -132,7 +132,7 @@ def _group_requests_by_strategy_key_impl(
     }
 
 
-def _apply_embedding_bias_impl(
+def _apply_embedding_bias(
     logits: torch.Tensor,
     requests: list[LlmRequest],
     request_steps: torch.Tensor,

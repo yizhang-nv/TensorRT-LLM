@@ -25,14 +25,11 @@ from typing import Generic, Literal, Optional, TypeAlias, TypeVar, cast
 
 import torch
 
-from tensorrt_llm.sampling_params import SamplingParams
-
 if sys.version_info[:2] >= (3, 12):
     from typing import override
 else:
     from typing_extensions import override
 
-from ..utils import MYPYCLIB_ENABLED
 
 TemperatureOnly: TypeAlias = tuple[Literal["temperature"], float]
 TopK: TypeAlias = tuple[Literal["top_k"], int, float]
@@ -50,49 +47,6 @@ class UtilsSamplingParams:
     temperature: Optional[float]
     top_p: Optional[float]
     top_k: Optional[int]
-
-
-def resolve_sampling_strategy(params: UtilsSamplingParams, *, vocab_size: int) -> Strategy:
-    # The semantics are specified in the doc-string of SamplingParams
-
-    if MYPYCLIB_ENABLED:
-        import mypyclib
-
-        return mypyclib.resolve_sampling_strategy_impl(params, vocab_size=vocab_size)
-
-    temperature = params.temperature
-    top_p = params.top_p
-    top_k = params.top_k
-
-    if SamplingParams.params_imply_greedy_decoding(
-        temperature=temperature,
-        top_p=top_p,
-        top_k=top_k,
-    ):
-        return GREEDY
-
-    # --- resolving default values
-    # NB: not greedy, hence temperature != 0 if specified
-    temperature = temperature or 1.0
-
-    # NB: not greedy, hence top_p != 0 if specified
-    top_p = top_p or 1.0
-    # NB: not greedy, hence top_k != 1 if specified
-    #     (0 and vocab_size are equivalent)
-    top_k = top_k or vocab_size
-
-    assert top_k > 1, "non-greedy sampling requires valid top_k"
-    need_top_k = top_k < vocab_size
-    assert top_p > 0, "non-greedy sampling requires valid top_p"
-    need_top_p = top_p < 1
-
-    if need_top_p:
-        if need_top_k:
-            return ("top_k_top_p", top_k, top_p, temperature)
-        return ("top_p", top_p, temperature)
-    if need_top_k:
-        return ("top_k", top_k, temperature)
-    return ("temperature", temperature)
 
 
 def top_k_sampling_batch(

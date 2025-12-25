@@ -13,18 +13,18 @@
 # limitations under the License.
 
 import enum
+import os
 import sys
 from abc import ABC, abstractmethod
-from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass
 from functools import cached_property
-from itertools import repeat
-from typing import Any, Callable, List, Optional, Type, TypeVar, cast
+from typing import Any, List, Optional, Type, TypeVar, cast
 
 import numpy as np
 import torch
 import torch.nn.functional as F
+from dynamic_path_manager import DynamicPathManager
 
 from tensorrt_llm._torch.pyexecutor.make_decoding_batch_input_output import (
     MakeDecodingBatchInputOutput,
@@ -55,21 +55,25 @@ from tensorrt_llm.llmapi.llm_args import KvCacheConfig
 from tensorrt_llm.mapping import Mapping
 from tensorrt_llm.sampling_params import SamplingParams
 
+with DynamicPathManager(os.path.dirname(os.path.abspath(__file__))):
+    from sampling_helper_func import (
+        _apply_embedding_bias,
+        _group_requests_by_strategy_key,
+        _request_get_sampling_params,
+        _request_strategy,
+        _speculation_could_use_rejection_sampling,
+    )
+
 from ..flashinfer_utils import IS_FLASHINFER_AVAILABLE
 from ..speculative.spec_tree_manager import SpecTreeManager
-from ..utils import MYPYCLIB_ENABLED
 from .finish_reason import FinishedState
 from .llm_request import LlmRequest, LlmRequestState, get_draft_token_length
 from .resource_manager import ResourceManager, ResourceManagerType
 from .sampling_utils import (
     GREEDY,
-    GenericStrategyKeyType,
     GroupedStrategySampler,
     SimpleGroupedStrategySampler,
-    Strategy,
-    UtilsSamplingParams,
     get_rejected_indices,
-    resolve_sampling_strategy,
     sample,
     sample_rejected,
     torch_multi_arange,
@@ -238,81 +242,6 @@ class EarlyStopWithMMResult(Sampler):
     @override
     def is_generation_model(self) -> bool:
         return False
-
-
-# Due to tensorrt_llm::runtime::SamplingConfig using vectors, params
-# in LlmRequest.sampling_params are either None or single-element lists.
-# This helper method simplifies code using such params.
-def _unwrap_singleton(p: Optional[list[T]]) -> Optional[T]:
-    if p is None:
-        return None
-    (t,) = p
-    return t
-
-
-def _request_get_sampling_params(request: LlmRequest) -> UtilsSamplingParams:
-    if MYPYCLIB_ENABLED:
-        import mypyclib
-
-        return mypyclib._request_get_sampling_params_impl(request)
-    sampling_config = request.sampling_config
-    temperature = _unwrap_singleton(cast(Optional[list[float]], sampling_config.temperature))
-    top_p = _unwrap_singleton(cast(Optional[list[float]], sampling_config.top_p))
-    top_k = _unwrap_singleton(cast(Optional[list[int]], sampling_config.top_k))
-
-    return UtilsSamplingParams(
-        temperature=temperature,
-        top_p=top_p,
-        top_k=top_k,
-    )
-
-
-def _request_strategy(request: LlmRequest, *, vocab_size: int) -> Strategy:
-    if MYPYCLIB_ENABLED:
-        import mypyclib
-
-        return mypyclib._request_strategy_impl(request, vocab_size=vocab_size)
-    params = _request_get_sampling_params(request)
-    return resolve_sampling_strategy(params, vocab_size=vocab_size)
-
-
-def _group_requests_by_strategy_key(
-    requests: Iterable[LlmRequest],
-    *,
-    strategy_to_key: Callable[[Strategy, bool], GenericStrategyKeyType],
-    pin_memory: bool = False,
-    vocab_size: int,
-) -> dict[tuple[GenericStrategyKeyType, bool], tuple[torch.Tensor, List[Strategy]]]:
-    if MYPYCLIB_ENABLED:
-        import mypyclib
-
-        return mypyclib._group_requests_by_strategy_key_impl(
-            requests, strategy_to_key=strategy_to_key, pin_memory=pin_memory, vocab_size=vocab_size
-        )
-
-    # NB: Client code relies on request indices in returned torch.Tensor being sorted.
-    group_dict: dict[tuple[GenericStrategyKeyType, bool], tuple[list[int], list[Strategy]]] = (
-        defaultdict(lambda: ([], []))
-    )
-
-    for req_index, req in enumerate(requests):
-        strategy = _request_strategy(req, vocab_size=vocab_size)
-        speculation_needs_probs = (
-            # NB: This criterion needs to be consistent with the gating of rejection sampling in
-            #     process_draft_tokens.
-            TorchSampler._speculation_could_use_rejection_sampling(req, strategy)
-        )
-        strategy_key = strategy_to_key(strategy, speculation_needs_probs)
-        group_dict_entry = group_dict[(strategy_key, speculation_needs_probs)]
-        group_dict_entry[0].append(req_index)
-        group_dict_entry[1].append(strategy)
-    return {
-        group_key: (
-            torch.tensor(indices, pin_memory=pin_memory, dtype=torch.int32),
-            strategies,
-        )
-        for group_key, (indices, strategies) in group_dict.items()
-    }
 
 
 def add_token(
@@ -1045,21 +974,6 @@ class TorchSampler(Sampler):
 
         return num_accepted
 
-    @staticmethod
-    def _speculation_could_use_rejection_sampling(
-        request: LlmRequest, strategy: Optional[Strategy] = None
-    ) -> bool:
-        if MYPYCLIB_ENABLED:
-            import mypyclib
-
-            return mypyclib._speculation_could_use_rejection_sampling_impl(request, strategy)
-        if strategy is None:
-            strategy = _request_strategy(
-                request,
-                vocab_size=2**31,  # vocab_size does not affect greediness
-            )
-        return get_draft_token_length(request) > 0 and strategy != GREEDY
-
     def process_draft_tokens(
         self,
         request: LlmRequest,
@@ -1069,7 +983,7 @@ class TorchSampler(Sampler):
         resource_manager: Optional[ResourceManager] = None,
     ) -> int:
         if not (
-            self._speculation_could_use_rejection_sampling(request)
+            _speculation_could_use_rejection_sampling(request)
             # NB: '_speculation_could_use_rejection_sampling' is called in sample_async, which precludes
             #     inspection of .py_draft_logits, because it is not set yet when the overlap path
             #     is used.
@@ -1211,92 +1125,6 @@ class TorchSampler(Sampler):
         if "d2t" in model_outputs:
             d2t = model_outputs["d2t"][tokens]
             tokens += d2t
-
-    @staticmethod
-    def _apply_embedding_bias(
-        logits: torch.Tensor,
-        requests: list[LlmRequest],
-        request_steps: torch.Tensor,
-    ) -> None:
-        """Apply embedding bias (aka logit bias) to logits.
-
-        Arguments:
-          request_steps: Number of steps/tokens for each request.
-
-        Modifies logits in-place.
-        """
-        if MYPYCLIB_ENABLED:
-            import mypyclib
-
-            return mypyclib._apply_embedding_bias_impl(logits, requests, request_steps)
-
-        # NB: Unfortunately, Torch provides no combination of torch.index_select (similar to
-        #     torch.Tensor.gather -- allows one-to-many mapping) and addition, analogous to how
-        #     torch.Tensor.scatter_add_ (and it's variant torch.Tensor.index_add_ -- allows
-        #     many-to-one mapping) combine addition with torch.Tensor.scatter_.
-        #
-        #     Notwithstanding the previous point, there are two options:
-        #         (i)  materialize a permuted bias tensor with repeated consecutive rows via
-        #              torch.repeat_interleave and then use torch.Tensor.index_add_ (poor write
-        #              locality / risk of false sharing)
-        #        (ii)  materialize the correctly ordered bias tensor via torch.index_select and then
-        #              perform a masked addition (poor read locality for request batches randomly
-        #              mixing uniform and heterogeneous bias tensors, i.e., mixing slices with high
-        #              and low reuse).
-        #     Since read-caching is expected to help in typical cases, option (ii) is implemented here.
-
-        # Track which logits require logit bias application
-        logits_bias_mask = torch.zeros((logits.size(0),), dtype=torch.bool, pin_memory=True)
-
-        _next_bias_index = 0
-
-        def provision_bias_index() -> int:
-            nonlocal _next_bias_index
-            bias_index = _next_bias_index
-            _next_bias_index += 1
-            return bias_index
-
-        # Indices of unique bias tensors
-        #
-        # NB: hash(torch.Tensor) is equivalent to id(torch.Tensor), and does not
-        #     depend on tensor contents, cf. https://github.com/pytorch/pytorch/issues/2569
-        bias_to_index: dict[torch.Tensor, int] = defaultdict(provision_bias_index)
-
-        # Source indices for bias application
-        bias_gather_indices: list[int] = []
-
-        # Collect bias information
-        req_bias = None
-        for i, (req, steps) in enumerate(zip(requests, request_steps)):
-            steps = int(steps.item())
-            req_bias = req._py_embedding_bias_1d
-            if req_bias is not None:
-                logits_bias_mask[i : (i + steps)] = True
-                req_bias_index = bias_to_index[req_bias]
-                bias_gather_indices.extend(repeat(req_bias_index, steps))
-
-        if not bias_to_index:
-            return
-        assert req_bias is not None  # otherwise bias_to_index is empty
-
-        bias_gather_indices_cuda = torch.tensor(
-            bias_gather_indices, pin_memory=True, dtype=torch.int32
-        ).to(logits.device, non_blocking=True)
-        logits_bias_mask_cuda = logits_bias_mask.to(logits.device, non_blocking=True)
-        biases_tensor = torch.empty((len(bias_to_index), *req_bias.shape), pin_memory=True)
-        biases_tensor = torch.stack(
-            tuple(bias_to_index.keys()),
-            out=biases_tensor,
-        )
-        biases_tensor_cuda = biases_tensor.to(logits.device, non_blocking=True)
-
-        biases_tensor_cuda = torch.index_select(biases_tensor_cuda, 0, bias_gather_indices_cuda)
-        # NB: Avoiding logits[bias_scatter_indices] += biases_tensor (and torch.Tensor.scatter_add_), because it
-        #     is unclear if this allows for repeated indices, cf.
-        #         https://docs.pytorch.org/docs/2.8/generated/torch.Tensor.index_put_.html#torch-tensor-index-put
-        #     and thus introduces read-after-write dependencies (including possible false
-        #     sharing).
-        logits[logits_bias_mask_cuda] += biases_tensor_cuda
 
     def _sample_batched_by_strategy(
         self,
@@ -1772,7 +1600,7 @@ class TorchSampler(Sampler):
 
         # Handle embedding bias
         logits_cuda = raw_logits_cuda[:sum_steps]
-        self._apply_embedding_bias(logits_cuda, requests, req_num_steps)
+        _apply_embedding_bias(logits_cuda, requests, req_num_steps)
 
         logits_cuda = self._apply_min_length_penalty(logits_cuda, requests, req_num_steps_list)
 
