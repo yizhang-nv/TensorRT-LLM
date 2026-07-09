@@ -149,6 +149,11 @@ public:
     // Migrate a batch of pages to GPU (used by batchedLockToGpu).
     void batchedMigrateToGpu(std::vector<BatchedLockTarget> const& targets, KvCache& kvCache);
 
+    void setExecutionStream(CudaStream stream) noexcept
+    {
+        mExecutionStream = stream;
+    }
+
     // Best-effort migration of grouped pages to a destination cache level.
     void prefetch(
         CacheLevel dstLevel, TypedVec<PoolGroupIndex, TypedVec<CacheLevel, std::vector<SharedPtr<Page>>>> const& pages);
@@ -303,6 +308,7 @@ private:
     TypedVec<PoolGroupIndex, SlotDesc> mSlotDescList;
     TypedVec<PoolGroupIndex, SlotCount> mMinSlots;
     TypedVec<CacheLevel, CacheLevelManager> mLevels;
+    std::optional<CudaStream> mExecutionStream;
 };
 
 } // namespace tensorrt_llm::batch_manager::kv_cache_manager_v2

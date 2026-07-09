@@ -938,6 +938,7 @@ void KvCacheManagerV2Bindings::initBindings(nb::module_& m)
         .def_prop_ro("num_layers", &kv::KvCacheManager::numLayers)
         .def_prop_ro("layer_ids", &kv::KvCacheManager::layerIds)
         .def_prop_ro("layer_grouping", [](kv::KvCacheManager const& self) { return self.layerGrouping().raw(); })
+        .def("set_execution_stream", &kv::KvCacheManager::setExecutionStream, nb::arg("stream"))
         .def(
             "get_layer_group_id",
             [](kv::KvCacheManager const& self, kv::LayerId layerId) { return self.getLayerGroupId(layerId).value(); },

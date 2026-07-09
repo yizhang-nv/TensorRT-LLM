@@ -29,6 +29,7 @@ from ._common import (
     BlockOrdinal,
     CacheLevel,
     CacheTier,
+    CudaStream,
     LayerId,
     MemAddress,
     PageStatus,
@@ -177,6 +178,7 @@ class StorageManager:
         "_slot_desc_list",
         "_levels",
         "_min_slots",
+        "_execution_stream",
         "__rawref__",
     )
     _life_cycles: LifeCycleRegistry
@@ -189,6 +191,7 @@ class StorageManager:
     _slot_desc_list: TypedIndexList[PoolGroupIndex, SlotDesc]
     _levels: TypedIndexList[CacheLevel, CacheLevelManager]
     _min_slots: TypedIndexList[PoolGroupIndex, int]
+    _execution_stream: CudaStream | None
     __rawref__: rawref.ref["StorageManager"]
 
     def __init__(
@@ -201,6 +204,7 @@ class StorageManager:
         constraints: list[BatchDesc] | None = None,
     ) -> None:
         self.__rawref__ = rawref.NULL
+        self._execution_stream: CudaStream | None = None
         assert config.cache_tiers[GPU_LEVEL].tier == CacheTier.GPU_MEM, (
             "The first cache tier must be GPU memory"
         )
@@ -515,6 +519,11 @@ class StorageManager:
         try:
             assert len(dst_slots) == num_slots
             prior_events: set[CachedCudaEvent] = set()
+            # Page ready events can be stale after reuse locks or event
+            # scrubbing. Fence migrations behind all forward work queued on
+            # the execution stream before copying KV bytes on a temp stream.
+            if self._execution_stream is not None and not defrag:
+                prior_events.add(CachedCudaEvent(self._execution_stream))
             tasks_per_pool: TypedIndexList[PoolIndex, list[CopyTask]] = make_typed(
                 lambda _: list[CopyTask](), num_pools
             )

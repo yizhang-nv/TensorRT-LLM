@@ -1344,10 +1344,20 @@ class PyExecutor:
         num_context_requests = 0
         num_ctx_tokens = 0
         num_ctx_kv_tokens = 0
+        get_context_request_range = getattr(scheduled_batch,
+                                            "get_context_request_range", None)
         for req in scheduled_batch.context_requests:
             if filter_dummies and self._is_stats_dummy_request(req):
                 continue
             num_context_requests += 1
+            context_range = (get_context_request_range(req)
+                             if get_context_request_range is not None else None)
+            if context_range is not None:
+                start, end = context_range
+                chunk = end - start
+                num_ctx_tokens += chunk
+                num_ctx_kv_tokens += start
+                continue
             try:
                 start = req.context_current_position
                 chunk = req.context_chunk_size
@@ -4828,10 +4838,14 @@ class PyExecutor:
 
         for request in scheduled_requests.context_requests:
             if request.state != LlmRequestState.GENERATION_COMPLETE:  # skip failed requests
-                request.py_last_context_chunk = (
+                context_range = (
                     request.context_current_position,
                     request.context_current_position +
-                    request.context_chunk_size)
+                    request.context_chunk_size,
+                )
+                request.py_last_context_chunk = context_range
+                scheduled_requests.record_context_request_range(
+                    request, *context_range)
                 request.move_to_next_context_chunk()
             if request.context_remaining_length == 0:
                 # Prefill is done for this request; drop pinned encoder outputs

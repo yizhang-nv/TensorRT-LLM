@@ -213,6 +213,11 @@ public:
     bool needAdjustment() const;
     void adjust();
 
+    void setExecutionStream(CudaStream stream) noexcept
+    {
+        mStorage->setExecutionStream(stream);
+    }
+
     // ---- Internals used by KvCache ----------------------------------------
 
     StorageManager& storage() noexcept

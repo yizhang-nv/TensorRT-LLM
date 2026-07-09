@@ -590,7 +590,16 @@ void StorageManager::_batchedMigrate(PoolGroupIndex pgIdx, CacheLevel dstLevel, 
 
         // Collect prior events (src + dst ready events) — mirrors Python's prior_events set.
         std::vector<CachedCudaEvent const*> priorEvents;
-        priorEvents.reserve(2 * srcPages.size());
+        priorEvents.reserve(2 * srcPages.size() + 1);
+        std::optional<CachedCudaEvent> executionEvent;
+        // Page ready events can be stale after reuse locks or event
+        // scrubbing. Fence migrations behind all forward work queued on the
+        // execution stream before copying KV bytes on a temporary stream.
+        if (mExecutionStream.has_value() && !defrag)
+        {
+            executionEvent.emplace(*mExecutionStream);
+            priorEvents.push_back(&*executionEvent);
+        }
         for (std::size_t i = 0; i < srcPages.size(); ++i)
         {
             priorEvents.push_back(&srcPages.at(i)->readyEvent);
