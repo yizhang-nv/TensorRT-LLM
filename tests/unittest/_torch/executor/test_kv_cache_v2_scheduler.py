@@ -362,6 +362,21 @@ class TestTokenBudget:
         out = sched.schedule_request(reqs, set())
         assert len(out.generation_requests) == 2
 
+    def test_batch_size_limit_with_larger_scheduler_capacity(self):
+        """PP capacity must not enlarge a single forward micro-batch."""
+        mgr = make_kv_cache_manager()
+        sched = make_scheduler(
+            mgr,
+            max_batch_size=32,
+            max_num_tokens=8192,
+            scheduler_capacity=128,
+        )
+        reqs = [make_gen_request(i, num_draft_tokens=1) for i in range(44)]
+
+        out = sched.schedule_request(reqs, set())
+
+        assert ids(out.generation_requests) == list(range(32))
+
     def test_combined_batch_and_budget(self):
         mgr = make_kv_cache_manager()
         sched = make_scheduler(mgr, max_batch_size=3, max_num_tokens=2)

@@ -152,6 +152,7 @@ class KVCacheV2Scheduler(RequestScheduler):
         cross_kv_cache_manager=None,  # KVCacheManagerV2 for enc-dec cross-attn
     ):
         self.max_num_tokens = max_num_tokens
+        self.max_batch_size = max_batch_size
         self.max_num_requests = (
             scheduler_capacity if scheduler_capacity is not None else max_batch_size
         )
@@ -244,7 +245,7 @@ class KVCacheV2Scheduler(RequestScheduler):
 
         budget = BudgetTracker(
             self.max_num_tokens,
-            self.max_num_requests,
+            self.max_batch_size,
             self.peft_cache_manager,
         )
 
