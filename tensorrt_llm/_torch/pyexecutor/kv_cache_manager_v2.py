@@ -1789,6 +1789,16 @@ class KVCacheManagerV2(BaseResourceManager):
             self._stream.cuda_stream,
         )
 
+    def probe_prefix_match_length(self, input_tokens, lora_task_id=None):
+        """Probe the KV cache radix tree for prefix match length.
+
+        Returns the number of prefix tokens already cached on this rank.
+        Used by KVCacheAwareADPRouter for cache-aware routing.
+        """
+        if not self.enable_block_reuse or not input_tokens:
+            return 0
+        return self.impl.probe_reuse(ReuseScope(lora_id=lora_task_id), input_tokens)
+
     def _create_kv_cache(
         self,
         request_id: int,

@@ -566,3 +566,51 @@ class TestProbeOnV1KVCacheManager:
         result = KVCacheManager.probe_prefix_match_length(mgr, input_tokens=list(range(200)))
         assert result == 192  # 3 blocks * 64 tokens/block
         mgr.impl.analyze_prefix_reuse.assert_called_once()
+
+
+# ---- Tests for V2 KVCacheManager.probe_prefix_match_length ----
+
+
+class TestProbeOnV2KVCacheManager:
+    """Test probe_prefix_match_length on KVCacheManagerV2 using mocks."""
+
+    def test_block_reuse_disabled_returns_zero(self):
+        from tensorrt_llm._torch.pyexecutor.kv_cache_manager_v2 import KVCacheManagerV2
+
+        mgr = Mock(spec=KVCacheManagerV2)
+        mgr.enable_block_reuse = False
+        mgr.impl = Mock()
+
+        result = KVCacheManagerV2.probe_prefix_match_length(mgr, input_tokens=[1, 2, 3])
+
+        assert result == 0
+        mgr.impl.probe_reuse.assert_not_called()
+
+    def test_empty_tokens_returns_zero(self):
+        from tensorrt_llm._torch.pyexecutor.kv_cache_manager_v2 import KVCacheManagerV2
+
+        mgr = Mock(spec=KVCacheManagerV2)
+        mgr.enable_block_reuse = True
+        mgr.impl = Mock()
+
+        result = KVCacheManagerV2.probe_prefix_match_length(mgr, input_tokens=[])
+
+        assert result == 0
+        mgr.impl.probe_reuse.assert_not_called()
+
+    def test_probe_reuse_with_lora_scope(self):
+        from tensorrt_llm._torch.pyexecutor.kv_cache_manager_v2 import KVCacheManagerV2
+        from tensorrt_llm.runtime.kv_cache_manager_v2 import ReuseScope
+
+        mgr = Mock(spec=KVCacheManagerV2)
+        mgr.enable_block_reuse = True
+        mgr.impl = Mock()
+        mgr.impl.probe_reuse.return_value = 128
+        input_tokens = list(range(200))
+
+        result = KVCacheManagerV2.probe_prefix_match_length(
+            mgr, input_tokens=input_tokens, lora_task_id=7
+        )
+
+        assert result == 128
+        mgr.impl.probe_reuse.assert_called_once_with(ReuseScope(lora_id=7), input_tokens)

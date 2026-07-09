@@ -4637,6 +4637,13 @@ class TorchLlmArgs(BaseLlmArgs):
         self._extra_resource_managers = value
 
     @model_validator(mode="after")
+    def force_kv_cache_manager_v2_for_validation(self) -> 'TorchLlmArgs':
+        self.kv_cache_config.use_kv_cache_manager_v2 = True
+        logger.info("KVCM v2 validation override active: "
+                    "kv_cache_config.use_kv_cache_manager_v2=True")
+        return self
+
+    @model_validator(mode="after")
     def set_model_format(self):
         self._model_format = _ModelFormatKind.HF
         return self
