@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """DWDP disaggregated serving accuracy tests.
 
 Separated from test_disaggregated_serving.py to isolate MPI-dependent test
@@ -211,7 +214,7 @@ class TestDwdpDeepSeekV3Lite(LlmapiAccuracyTestHarness):
                 "tokens_per_block": 32,
             },
             "cache_transceiver_config": {
-                "backend": "UCX",
+                "backend": "NIXL",
                 "max_tokens_in_buffer": 8192,
             },
             "moe_config": {
@@ -243,7 +246,7 @@ class TestDwdpDeepSeekV3Lite(LlmapiAccuracyTestHarness):
                 "tokens_per_block": 32,
             },
             "cache_transceiver_config": {
-                "backend": "UCX",
+                "backend": "NIXL",
                 "max_tokens_in_buffer": 8192,
             },
             "moe_config": {
@@ -326,7 +329,7 @@ class TestDwdpDeepSeekV3Lite(LlmapiAccuracyTestHarness):
                 "tokens_per_block": 32,
             },
             "cache_transceiver_config": {
-                "backend": "UCX",
+                "backend": "NIXL",
                 "max_tokens_in_buffer": 8192,
             },
             "moe_config": {
@@ -359,7 +362,7 @@ class TestDwdpDeepSeekV3Lite(LlmapiAccuracyTestHarness):
                 "tokens_per_block": 32,
             },
             "cache_transceiver_config": {
-                "backend": "UCX",
+                "backend": "NIXL",
                 "max_tokens_in_buffer": 8192,
             },
             "moe_config": {
@@ -461,7 +464,7 @@ class TestDwdpDeepSeekV3Lite(LlmapiAccuracyTestHarness):
                 "tokens_per_block": 32,
             },
             "cache_transceiver_config": {
-                "backend": "UCX",
+                "backend": "NIXL",
                 "max_tokens_in_buffer": 8192,
             },
             "moe_config": {
@@ -497,7 +500,7 @@ class TestDwdpDeepSeekV3Lite(LlmapiAccuracyTestHarness):
                 "tokens_per_block": 32,
             },
             "cache_transceiver_config": {
-                "backend": "UCX",
+                "backend": "NIXL",
                 "max_tokens_in_buffer": 8192,
             },
             "moe_config": {
