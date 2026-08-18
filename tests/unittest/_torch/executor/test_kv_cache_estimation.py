@@ -10,6 +10,7 @@ produces tp_size duplicate requests, but the scheduler distributes them
 share, not all copies.
 """
 
+import math
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -564,9 +565,68 @@ def test_v2_cache_size_per_token_models_generation_swa_cost():
     )
 
     # Per layer: K+V * kv_heads * head_dim * bf16 bytes = 2 * 2 * 8 * 2.
-    expected = CacheCost(slope=64, intercept=3 * 2 * 2048 * 64)
+    # AttnLifeCycle retains one extra boundary block for the in-flight token:
+    # each 2048-token SWA layer therefore needs 33 64-token blocks.
+    expected = CacheCost(slope=64, intercept=3 * 2 * (2048 + 64) * 64)
     assert no_scratch_size_per_token == expected
     assert scratch_size_per_token == expected
+
+
+def test_v2_dflash_draft_cost_covers_context_and_generation_slots():
+    class FakeDraftModelConfig:
+        quant_config = None
+        pretrained_config = SimpleNamespace(
+            hidden_size=32,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            sliding_window=512,
+            layer_types=["sliding_attention"],
+        )
+
+        def get_num_attention_layers(self):
+            return 1
+
+    mode = Mock()
+    mode.use_one_engine.return_value = True
+    spec_config = SimpleNamespace(
+        spec_dec_mode=mode,
+        max_draft_len=4,
+        max_total_draft_tokens=4,
+        tokens_per_gen_step=5,
+        use_dynamic_tree=False,
+        _use_shared_kv_cache=False,
+    )
+    mapping = Mock(enable_attention_dp=False, tp_size=1)
+    mapping.pp_layers.return_value = [0]
+    tokens_per_block = 32
+    max_batch_size = 128
+    max_num_tokens = 4096
+
+    cost = CacheCost.from_raw(
+        KVCacheManagerV2.get_cache_size_per_token(
+            FakeDraftModelConfig(),
+            mapping,
+            tokens_per_block=tokens_per_block,
+            max_seq_len=4096,
+            max_batch_size=max_batch_size,
+            max_num_tokens=max_num_tokens,
+            kv_cache_config=KvCacheConfig(max_attention_window=[512]),
+            spec_config=spec_config,
+            is_draft=True,
+        )
+    )
+
+    # One layer stores K+V * 2 KV heads * 8 head dim * BF16 = 64 B/token.
+    slot_bytes = tokens_per_block * 64
+    # Runtime generation capacity can lead history by max_draft_len - 1
+    # (get_num_extra_kv_tokens) plus tokens_per_gen_step: 3 + 5 = 8.
+    generation_blocks_per_request = math.ceil((512 + 8 - 1) / tokens_per_block) + 1
+    assert generation_blocks_per_request == 18
+    context_slots = max_num_tokens // tokens_per_block
+    expected_usable_slots = max_batch_size * generation_blocks_per_request + context_slots
+    assert expected_usable_slots == 2_432
+    assert cost == CacheCost(slope=0, intercept=expected_usable_slots * slot_bytes)
+    assert cost.allocation_unit == slot_bytes
 
 
 def test_creator_uses_v2_affine_cache_cost():
@@ -596,6 +656,7 @@ def test_v2_quota_from_max_tokens_models_context_swa_scratch():
     manager.tokens_per_block = 64
     manager.max_batch_size = 4
     manager.max_num_tokens = 1000
+    manager._generation_kv_capacity_headroom = 1
     manager.get_layer_bytes_per_token = lambda local_layer_idx, data_role: [10, 10, 20][
         local_layer_idx
     ]
@@ -604,12 +665,16 @@ def test_v2_quota_from_max_tokens_models_context_swa_scratch():
 
     manager.enable_swa_scratch_reuse = False
     no_scratch_quota = manager._get_quota_from_max_tokens(max_tokens)
-    assert no_scratch_quota == (max_tokens * 20 + manager.max_num_tokens * 20 + 4 * 2 * 128 * 10)
+    assert no_scratch_quota == (
+        max_tokens * 20 + manager.max_num_tokens * 20 + 4 * 2 * (128 + 64) * 10
+    )
     assert manager._get_max_tokens_from_quota(no_scratch_quota) == max_tokens
 
     manager.enable_swa_scratch_reuse = True
     scratch_quota = manager._get_quota_from_max_tokens(max_tokens)
-    assert scratch_quota == (max_tokens * 20 + manager.max_num_tokens * 10 + 4 * 2 * 128 * 10)
+    assert scratch_quota == (
+        max_tokens * 20 + manager.max_num_tokens * 10 + 4 * 2 * (128 + 64) * 10
+    )
     assert manager._get_max_tokens_from_quota(scratch_quota) == max_tokens
 
 

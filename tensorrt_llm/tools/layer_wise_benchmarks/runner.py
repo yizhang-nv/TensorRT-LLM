@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 import contextlib
 import functools
 import inspect
@@ -783,9 +786,12 @@ class Runner:
 
         # Please refer to `tensorrt_llm/_torch/pyexecutor/_util.py` for `kv_cache_manager`
         config = model_config.pretrained_config
+        # Every dummy request below is allocated at max_seq_len. Match the V2
+        # hybrid pool ratio to that workload instead of its half-length fallback.
         kv_cache_config = KvCacheConfig(
             max_tokens=max_batch_size * round_up(max_seq_len, tokens_per_block),
             enable_block_reuse=False,
+            avg_seq_len=max_seq_len,
         )
         kv_cache_manager_cls = get_kv_cache_manager_cls(model_config, kv_cache_config)
         kv_cache_dtype = {
@@ -888,9 +894,11 @@ class Runner:
             )
         else:
             raise NotImplementedError("Unsupported config")
-        kv_cache_manager.add_dummy_requests(
+        dummy_requests = kv_cache_manager.add_dummy_requests(
             list(range(max_batch_size)), token_nums=[max_seq_len] * max_batch_size
         )
+        if dummy_requests is None:
+            raise RuntimeError("Failed to allocate KV cache for layer-wise benchmark requests")
         return kv_cache_manager
 
     @staticmethod

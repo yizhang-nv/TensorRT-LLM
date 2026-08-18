@@ -71,6 +71,7 @@ from tensorrt_llm.runtime.kv_cache_manager_v2 import (
     _KVCache,
     exact_div,
     gen_multimodal_cache_key_tokens,
+    sequence_to_blockchain_keys,
     typed_range,
 )
 from tensorrt_llm.runtime.kv_cache_manager_v2 import KVCacheManager as KVCacheManagerPy
@@ -115,6 +116,11 @@ KV_CACHE_ITERATION_STATS_REUSE_FIELDS = (
     "iter_partial_reused_blocks",
     "iter_missed_blocks",
 )
+
+# Every generation step reserves the golden/base token in addition to any
+# speculative draft tokens. Keep this shared with the capacity-growth paths so
+# cache estimation and runtime allocation cannot drift apart.
+BASE_GENERATION_TOKEN_COUNT = 1
 KV_CACHE_ITERATION_STATS_POOL_GROUP_FIELDS = tuple(
     field_name
     for field_name in KV_CACHE_ITERATION_STATS_DELTA_FIELDS
@@ -282,6 +288,7 @@ def _estimate_swa_cache_size(
     *,
     context: bool,
     scratch: bool,
+    generation_capacity_headroom: int = BASE_GENERATION_TOKEN_COUNT,
 ) -> tuple[int, int]:
     tokens_per_block = int(tokens_per_block)
     size_per_token = 0
@@ -289,7 +296,14 @@ def _estimate_swa_cache_size(
     scratch_keys = set()
     for layer_size, window_size in zip(layer_sizes, attention_windows):
         if window_size is not None and window_size > 0:
-            window_tokens = math.ceil(window_size / tokens_per_block) * tokens_per_block
+            # Match AttnLifeCycle.get_stale_range(): the live window can span
+            # one more page at block boundaries, and generation capacity can
+            # lead history by the base/speculative tokens reserved for the
+            # next forward pass.
+            window_blocks = (
+                math.ceil((window_size + generation_capacity_headroom - 1) / tokens_per_block) + 1
+            )
+            window_tokens = window_blocks * tokens_per_block
             if not context:
                 size_per_request += window_tokens * layer_size
             elif not scratch:
@@ -302,6 +316,32 @@ def _estimate_swa_cache_size(
                     scratch_keys.add(scratch_key)
                     size_per_token += layer_size
     return size_per_token, size_per_request
+
+
+def _get_kv_reserve_draft_tokens(spec_config, *, is_draft: bool) -> int:
+    """Return the same speculative KV reserve used by runtime resize paths."""
+    if spec_config is None:
+        return 0
+    reserve = spec_config.max_total_draft_tokens
+    if (
+        is_draft
+        and getattr(spec_config, "use_dynamic_tree", False)
+        and getattr(spec_config, "dynamic_tree_max_topK", 0) > 0
+    ):
+        draft_loop_tokens = spec_config.dynamic_tree_max_topK * spec_config.max_draft_len
+        reserve = max(reserve, draft_loop_tokens)
+    return reserve
+
+
+def _get_generation_kv_capacity_headroom(spec_config, *, is_draft: bool) -> int:
+    """Maximum capacity lead over history used by generation KV allocation."""
+    from ..speculative import get_num_extra_kv_tokens
+
+    if spec_config is None:
+        return BASE_GENERATION_TOKEN_COUNT
+    reserve = _get_kv_reserve_draft_tokens(spec_config, is_draft=is_draft)
+    dynamic_reserve = reserve - spec_config.max_total_draft_tokens
+    return get_num_extra_kv_tokens(spec_config) + spec_config.tokens_per_gen_step + dynamic_reserve
 
 
 def _get_static_cache_size_layer_components(
@@ -393,6 +433,26 @@ def _hash_to_digest(hash_ints: Sequence[int]) -> bytes:
     if not all(isinstance(value, int) for value in hash_ints):
         raise ValueError("Expected multimodal hash values to be integers")
     return b"".join(v.to_bytes(4, "big", signed=True) for v in hash_ints)
+
+
+def _multimodal_cache_digest(hash_ints: Sequence[int], uuid: str | None) -> bytes:
+    """Return the radix-tree digest for multimodal content and its optional UUID."""
+    content_digest = _hash_to_digest(hash_ints)
+    if uuid is None:
+        return content_digest
+    uuid_bytes = uuid.encode("utf-8")
+    hasher = hashlib.sha256()
+    hasher.update(b"tensorrt-llm-kv-cache-v2-mm-key\0")
+    hasher.update(content_digest)
+    hasher.update(len(uuid_bytes).to_bytes(8, "little"))
+    hasher.update(uuid_bytes)
+    return hasher.digest()
+
+
+def _multimodal_uuid(uuids: Sequence[str | None] | None, item_idx: int) -> str | None:
+    if uuids is None or item_idx >= len(uuids):
+        return None
+    return uuids[item_idx]
 
 
 def _ensure_int64_cpu_tensor(values: Sequence[int] | torch.Tensor) -> torch.Tensor:
@@ -504,6 +564,7 @@ def _augment_tokens_with_mm_run_metadata(
     vocab_size: int,
     result: list[TokenIdExt],
     multimodal_hashes: Sequence[Sequence[int]],
+    multimodal_uuids: Sequence[str | None] | None,
     metadata: _MmRunMetadata,
     chunk_start: int,
     chunk_end: int,
@@ -547,7 +608,9 @@ def _augment_tokens_with_mm_run_metadata(
     ):
         if item_idx != current_item_idx:
             current_item_idx = item_idx
-            digest = _hash_to_digest(multimodal_hashes[item_idx])
+            digest = _multimodal_cache_digest(
+                multimodal_hashes[item_idx], _multimodal_uuid(multimodal_uuids, item_idx)
+            )
         # Feed the coarse item property (content digest) and granular run
         # properties (item-local offset and span length) into the key
         # generator, so cache keys reflect the actual multimodal tokens being
@@ -565,6 +628,7 @@ def _augment_tokens_with_contiguous_mm_metadata(
     vocab_size: int,
     result: list[TokenIdExt],
     multimodal_hashes: Sequence[Sequence[int]],
+    multimodal_uuids: Sequence[str | None] | None,
     multimodal_positions: Sequence[int] | torch.Tensor,
     multimodal_lengths: Sequence[int] | torch.Tensor,
     chunk_start: int,
@@ -589,11 +653,68 @@ def _augment_tokens_with_contiguous_mm_metadata(
         overlap_length = overlap_end - overlap_start
         result[result_offset : result_offset + overlap_length] = gen_multimodal_cache_key_tokens(
             vocab_size,
-            _hash_to_digest(multimodal_hashes[item_idx]),
+            _multimodal_cache_digest(
+                multimodal_hashes[item_idx], _multimodal_uuid(multimodal_uuids, item_idx)
+            ),
             overlap_length,
             token_offset=source_offset,
         )
 
+    return result
+
+
+def _multimodal_event_keys_for_range(
+    req: LlmRequest, start_token_idx: int, end_token_idx: int
+) -> list[tuple[bytes, int, str | None]]:
+    """Build V1-compatible multimodal event keys for one KV-cache block range."""
+    multimodal_hashes = req.multimodal_hashes
+    if not multimodal_hashes or start_token_idx >= end_token_idx:
+        return []
+
+    multimodal_uuids = getattr(req, "multimodal_uuids", None)
+    run_metadata = _resolve_multimodal_run_metadata(req)
+    if run_metadata is not None:
+        overlap_mask = (run_metadata.run_ends > start_token_idx) & (
+            run_metadata.run_positions < end_token_idx
+        )
+        result = []
+        for run_idx in torch.nonzero(overlap_mask).flatten().tolist():
+            item_idx = int(run_metadata.run_item_indices[run_idx])
+            run_start = int(run_metadata.run_positions[run_idx])
+            overlap_start = max(start_token_idx, run_start)
+            start_offset = int(run_metadata.run_item_offsets[run_idx]) + overlap_start - run_start
+            result.append(
+                (
+                    _hash_to_digest(multimodal_hashes[item_idx]),
+                    start_offset,
+                    _multimodal_uuid(multimodal_uuids, item_idx),
+                )
+            )
+        return result
+
+    multimodal_positions = req.multimodal_positions
+    multimodal_lengths = req.multimodal_lengths
+    if multimodal_positions is None or multimodal_lengths is None:
+        return []
+    positions = _ensure_int64_cpu_tensor(multimodal_positions)
+    lengths = _ensure_int64_cpu_tensor(multimodal_lengths)
+    if len(multimodal_hashes) != positions.numel() or positions.numel() != lengths.numel():
+        raise ValueError("Multimodal hashes, positions, and lengths must have the same size")
+
+    result = []
+    for item_idx, (position, length) in enumerate(
+        zip(positions.tolist(), lengths.tolist(), strict=True)
+    ):
+        item_end = position + length
+        if end_token_idx > position and start_token_idx < item_end:
+            start_offset = max(start_token_idx, position) - position
+            result.append(
+                (
+                    _hash_to_digest(multimodal_hashes[item_idx]),
+                    start_offset,
+                    _multimodal_uuid(multimodal_uuids, item_idx),
+                )
+            )
     return result
 
 
@@ -832,15 +953,12 @@ class KVCacheManagerV2(BaseResourceManager):
         )
 
         # Mirror V1's KV reserve sizing (see V1 __init__ for rationale).
-        self._kv_reserve_draft_tokens = self.max_total_draft_tokens
-        if (
-            self.is_draft
-            and spec_config is not None
-            and getattr(spec_config, "use_dynamic_tree", False)
-            and getattr(spec_config, "dynamic_tree_max_topK", 0) > 0
-        ):
-            draft_loop_tokens = spec_config.dynamic_tree_max_topK * spec_config.max_draft_len
-            self._kv_reserve_draft_tokens = max(self.max_total_draft_tokens, draft_loop_tokens)
+        self._kv_reserve_draft_tokens = _get_kv_reserve_draft_tokens(
+            spec_config, is_draft=self.is_draft
+        )
+        self._generation_kv_capacity_headroom = _get_generation_kv_capacity_headroom(
+            spec_config, is_draft=self.is_draft
+        )
 
         self.event_buffer_max_size = kv_cache_config.event_buffer_max_size
         self.enable_stats = enable_stats
@@ -995,10 +1113,9 @@ class KVCacheManagerV2(BaseResourceManager):
             host_quota = kv_cache_config.host_cache_size
         else:
             # The V2 MAX_UTILIZATION scheduler relies on suspend/resume to
-            # evict and later restore KV cache pages.  Without a host tier,
-            # suspended pages have nowhere to be offloaded and resume()
-            # always fails, causing a scheduling deadlock where no
-            # generation request can ever make progress.
+            # evict and later restore KV cache pages. Without a secondary
+            # tier, suspended held pages cannot migrate out of GPU, so
+            # suspension cannot free capacity and scheduling can deadlock.
             #
             # Automatically provision a host tier matching the GPU quota so
             # suspend/resume works out of the box.  Cap at available host
@@ -1061,31 +1178,36 @@ class KVCacheManagerV2(BaseResourceManager):
             cache_tiers=cache_tiers,
         )
         config = self._build_cache_config(config)
+        has_host_cache_tier = any(
+            isinstance(tier, HostCacheTierConfig) for tier in config.cache_tiers
+        )
 
         self.kv_cache_manager_py_config = config
 
         try:
             self.impl = KVCacheManagerPy(config, event_manager=self.event_manager)
         except (CuError, KVCacheOutOfMemoryError):
-            if len(cache_tiers) > 1:
+            if has_host_cache_tier:
                 logger.warning(
                     "Failed to initialize KV cache manager with host cache "
                     "tier (cuMemHostRegister may have failed). "
                     "Retrying without host cache tier."
                 )
-                cache_tiers_gpu_only = [t for t in cache_tiers if isinstance(t, GpuCacheTierConfig)]
-                config = replace(config, cache_tiers=cache_tiers_gpu_only)
-                cache_tiers = cache_tiers_gpu_only
+                cache_tiers_without_host = [
+                    tier for tier in config.cache_tiers if not isinstance(tier, HostCacheTierConfig)
+                ]
+                config = replace(config, cache_tiers=cache_tiers_without_host)
                 self.kv_cache_manager_py_config = config
                 self.impl = KVCacheManagerPy(config, event_manager=self.event_manager)
             else:
                 raise
+        self.can_evict = len(config.cache_tiers) > 1
         if self.event_manager is not None:
             self.event_manager.set_layer_group_window_sizes(
                 self._get_event_window_sizes_by_layer_group()
             )
             self.event_manager.add_created_event(
-                self._get_event_num_blocks_per_cache_level(cache_tiers, tokens_per_block),
+                self._get_event_num_blocks_per_cache_level(config.cache_tiers, tokens_per_block),
                 self._get_event_layer_group_ids(),
             )
 
@@ -1152,7 +1274,10 @@ class KVCacheManagerV2(BaseResourceManager):
         # Account for max single-sequence capacity = seq_len + extra KV tokens +
         # _kv_reserve_draft_tokens (see __init__) + 1 base decode token.
         max_seq_capacity = (
-            self.max_seq_len + self.num_extra_kv_tokens + self._kv_reserve_draft_tokens + 1
+            self.max_seq_len
+            + self.num_extra_kv_tokens
+            + self._kv_reserve_draft_tokens
+            + BASE_GENERATION_TOKEN_COUNT
         )
         self.max_blocks_per_seq = (max_seq_capacity + tokens_per_block - 1) // tokens_per_block
         if self.max_blocks_per_seq % 4 != 0:
@@ -1443,7 +1568,12 @@ class KVCacheManagerV2(BaseResourceManager):
             generation_swa_size_per_token,
             generation_swa_size_per_request,
         ) = _estimate_swa_cache_size(
-            layer_sizes, attention_windows, self.tokens_per_block, context=False, scratch=False
+            layer_sizes,
+            attention_windows,
+            self.tokens_per_block,
+            context=False,
+            scratch=False,
+            generation_capacity_headroom=self._generation_kv_capacity_headroom,
         )
         size_per_batch = self.max_batch_size * generation_swa_size_per_request
         if quota < size_per_batch:
@@ -1479,7 +1609,12 @@ class KVCacheManagerV2(BaseResourceManager):
             generation_swa_size_per_token,
             generation_swa_size_per_request,
         ) = _estimate_swa_cache_size(
-            layer_sizes, attention_windows, self.tokens_per_block, context=False, scratch=False
+            layer_sizes,
+            attention_windows,
+            self.tokens_per_block,
+            context=False,
+            scratch=False,
+            generation_capacity_headroom=self._generation_kv_capacity_headroom,
         )
         context_tokens = min(max_tokens, self.max_num_tokens)
         generation_tokens = max_tokens - context_tokens
@@ -2211,7 +2346,7 @@ class KVCacheManagerV2(BaseResourceManager):
 
         Grows *current_capacity* by 1 + draft tokens.
         """
-        return current_capacity + 1 + self._effective_draft_len(req)
+        return current_capacity + BASE_GENERATION_TOKEN_COUNT + self._effective_draft_len(req)
 
     def try_allocate_generation(self, req: LlmRequest) -> bool:
         """Try to allocate one additional KV cache slot for a generation request.
@@ -2473,7 +2608,7 @@ class KVCacheManagerV2(BaseResourceManager):
             )
 
     def suspend_request(self, req: LlmRequest) -> None:
-        """Suspend a request's KV cache (move to host tier)."""
+        """Suspend a request's KV cache, allowing pages to migrate to a secondary tier."""
         kv_cache = self.kv_cache_map.get(req.py_request_id)
         if kv_cache is not None and kv_cache.is_active:
             kv_cache.suspend()
@@ -2616,20 +2751,58 @@ class KVCacheManagerV2(BaseResourceManager):
         chunk = tokens[chunk_start:chunk_end]
         result: list[TokenIdExt] = chunk.tolist() if hasattr(chunk, "tolist") else list(chunk)
         run_metadata = _resolve_multimodal_run_metadata(req)
+        multimodal_uuids = getattr(req, "multimodal_uuids", None)
         if run_metadata is not None:
             return _augment_tokens_with_mm_run_metadata(
-                self.vocab_size, result, req.multimodal_hashes, run_metadata, chunk_start, chunk_end
+                self.vocab_size,
+                result,
+                req.multimodal_hashes,
+                multimodal_uuids,
+                run_metadata,
+                chunk_start,
+                chunk_end,
             )
 
         return _augment_tokens_with_contiguous_mm_metadata(
             self.vocab_size,
             result,
             req.multimodal_hashes,
+            multimodal_uuids,
             req.multimodal_positions,
             req.multimodal_lengths,
             chunk_start,
             chunk_end,
         )
+
+    def _register_multimodal_event_keys(
+        self,
+        req: LlmRequest,
+        augmented_tokens: Sequence[TokenIdExt],
+        *,
+        include_partial: bool,
+    ) -> None:
+        if getattr(self, "event_manager", None) is None or req.multimodal_hashes is None:
+            return
+        reuse_scope = ReuseScope(
+            lora_id=req.lora_task_id,
+            salt=self._derive_reuse_salt(req.cache_salt),
+        )
+        block_start = 0
+        for token_block, block_key in sequence_to_blockchain_keys(
+            self.tokens_per_block, reuse_scope, augmented_tokens
+        ):
+            if not token_block:
+                continue
+            # A chunked prefill does not insert its intermediate partial block
+            # unless minimum snapshots are enabled. Do not retain metadata for
+            # a radix key that cannot produce a stored event.
+            if len(token_block) < self.tokens_per_block and not include_partial:
+                break
+            block_end = block_start + len(token_block)
+            mm_keys = _multimodal_event_keys_for_range(req, block_start, block_end)
+            if mm_keys:
+                self.event_manager.register_mm_keys(block_key, mm_keys)
+            block_start = block_end
 
     def _stats_window_size(self, window_size: Optional[int]) -> int:
         return self.max_seq_len if window_size is None else int(window_size)
@@ -3236,12 +3409,32 @@ class KVCacheManagerV2(BaseResourceManager):
             return
 
         if request.context_current_position > kv_cache.num_committed_tokens:
-            tokens = self._augment_tokens_for_block_reuse(
-                self._reuse_token_source(request),
-                request,
-                start=kv_cache.num_committed_tokens,
-                end=request.context_current_position,
-            )
+            token_source = self._reuse_token_source(request)
+            if (
+                getattr(self, "event_manager", None) is not None
+                and getattr(request, "multimodal_hashes", None) is not None
+            ):
+                augmented_tokens = self._augment_tokens_for_block_reuse(
+                    token_source,
+                    request,
+                    end=request.context_current_position,
+                )
+                self._register_multimodal_event_keys(
+                    request,
+                    augmented_tokens,
+                    include_partial=(
+                        request.context_remaining_length == 0
+                        or self.kv_cache_manager_py_config.commit_min_snapshot
+                    ),
+                )
+                tokens = augmented_tokens[kv_cache.num_committed_tokens :]
+            else:
+                tokens = self._augment_tokens_for_block_reuse(
+                    token_source,
+                    request,
+                    start=kv_cache.num_committed_tokens,
+                    end=request.context_current_position,
+                )
             # TODO: On a disaggregated prefill server, pass is_end=True for
             # the last context chunk to improve performance.
             kv_cache.commit(tokens)
@@ -3543,17 +3736,44 @@ class KVCacheManagerV2(BaseResourceManager):
         full_attn_size_per_token = _estimate_full_attn_size_per_token(
             layer_sizes, attention_windows
         )
+        spec_config = kwargs.get("spec_config")
+        is_draft = bool(kwargs.get("is_draft", False))
+        generation_capacity_headroom = _get_generation_kv_capacity_headroom(
+            spec_config, is_draft=is_draft
+        )
         swa_size_per_token, swa_size_per_request = _estimate_swa_cache_size(
             layer_sizes,
             attention_windows,
             kwargs["tokens_per_block"],
             context=False,
             scratch=False,
+            generation_capacity_headroom=generation_capacity_headroom,
+        )
+        context_swa_size_per_token, _ = _estimate_swa_cache_size(
+            layer_sizes,
+            attention_windows,
+            kwargs["tokens_per_block"],
+            context=True,
+            scratch=bool(kwargs.get("enable_swa_scratch_reuse", False)),
         )
         max_batch_size = int(kwargs.get("max_batch_size") or 0)
+        max_num_tokens = int(kwargs.get("max_num_tokens") or 0)
+        tokens_per_block = int(kwargs["tokens_per_block"])
+        # When every local layer shares one positive SWA window, V2 groups
+        # their buffers into one pool and the indivisible allocation unit is
+        # exactly one combined block slot. Mixed/full-attention layouts can
+        # have multiple pool geometries, so retain byte granularity there.
+        allocation_unit = 1
+        if (
+            layer_sizes
+            and all(window is not None and window > 0 for window in attention_windows)
+            and len(set(attention_windows)) == 1
+        ):
+            allocation_unit = sum(layer_sizes) * tokens_per_block
         return (
             full_attn_size_per_token + swa_size_per_token,
-            swa_size_per_request * max_batch_size,
+            (swa_size_per_request * max_batch_size + context_swa_size_per_token * max_num_tokens),
+            allocation_unit,
         )
 
     def update_context_resources(self, scheduled_batch: ScheduledRequests):

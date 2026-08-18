@@ -14,6 +14,8 @@
 # limitations under the License.
 """Tests for KV cache budget splitting between target and draft managers."""
 
+import math
+import struct
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -37,13 +39,15 @@ def _make_creator(
     target_kv_per_token: int = 80,
     total_kv_intercept: int = 0,
     target_kv_intercept: int = 0,
+    total_allocation_unit: int = 1,
+    target_allocation_unit: int = 1,
+    draft_allocation_unit: int | None = None,
 ) -> KvCacheCreator:
     """Minimal KvCacheCreator for budget-split helpers.
 
     ``*_intercept`` model the affine fixed cost (e.g. mamba SSM state) that a
-    manager pays per batch regardless of token count. The draft cost is derived
-    as ``total - target`` for both slope and intercept (see
-    ``_get_target_and_draft_cache_costs``).
+    manager pays per batch regardless of token count. The draft mock receives
+    the component-wise ``total - target`` values directly.
     """
     c = object.__new__(KvCacheCreator)
 
@@ -60,11 +64,29 @@ def _make_creator(
 
     c._kv_cache_manager_cls = Mock()
     c._kv_cache_manager_cls.get_cache_size_per_token = Mock(
-        return_value=(target_kv_per_token, target_kv_intercept)
+        return_value=(
+            target_kv_per_token,
+            target_kv_intercept,
+            target_allocation_unit,
+        )
     )
 
     c._get_kv_size_per_token = Mock(
-        return_value=CacheCost(slope=total_kv_per_token, intercept=total_kv_intercept)
+        return_value=CacheCost(
+            slope=total_kv_per_token,
+            intercept=total_kv_intercept,
+            allocation_unit=total_allocation_unit,
+        )
+    )
+    c._should_create_separate_draft_kv_cache = Mock(return_value=True)
+    c._get_draft_cache_cost = Mock(
+        return_value=CacheCost(
+            slope=total_kv_per_token - target_kv_per_token,
+            intercept=total_kv_intercept - target_kv_intercept,
+            allocation_unit=(
+                total_allocation_unit if draft_allocation_unit is None else draft_allocation_unit
+            ),
+        )
     )
 
     return c
@@ -99,6 +121,7 @@ class TestSplitGpuBudgetForDraft:
         target_kv_config = KvCacheConfig(max_attention_window=[16384])
         mode = Mock()
         mode.is_external_drafter.return_value = is_external_drafter
+        mode.use_one_engine.return_value = True
 
         target_model_config = SimpleNamespace(is_encoder_decoder=False)
         draft_model_config = DraftModelConfig()
@@ -119,7 +142,14 @@ class TestSplitGpuBudgetForDraft:
         creator._mapping = Mock(enable_attention_dp=False, tp_size=1)
         creator._mapping.pp_layers.return_value = [0]
         creator._mapping.is_last_pp_rank.return_value = True
-        creator._speculative_config = SimpleNamespace(spec_dec_mode=mode)
+        creator._speculative_config = SimpleNamespace(
+            spec_dec_mode=mode,
+            max_draft_len=1,
+            max_total_draft_tokens=0,
+            tokens_per_gen_step=1,
+            use_dynamic_tree=False,
+            _use_shared_kv_cache=False,
+        )
         creator._model_engine = SimpleNamespace(
             model=SimpleNamespace(model_config=target_model_config)
         )
@@ -136,8 +166,12 @@ class TestSplitGpuBudgetForDraft:
         )
 
         # The draft layer stores 64 bytes/token in a fixed 512-token window.
+        # V2 retains one additional 64-token boundary block for the in-flight
+        # generation token, for nine blocks total.
         # Leaking the target's 16K window would instead count it as 64 bytes/token.
-        assert creator._get_kv_size_per_token() == CacheCost(slope=10, intercept=512 * 64)
+        cost = creator._get_kv_size_per_token()
+        assert cost == CacheCost(slope=10, intercept=9 * 64 * 64)
+        assert cost.allocation_unit == 64 * 64
         assert len(draft_kv_configs) == 1
         draft_kv_config = draft_kv_configs[0]
         assert draft_kv_config.max_attention_window == [512]
@@ -249,6 +283,142 @@ class TestSplitGpuBudgetForDraft:
 
         assert target_config is c._kv_cache_config
         assert draft_config is None
+
+    def test_fixed_only_draft_cost_is_split(self):
+        total_gpu = 10 * GB
+        draft_fixed_cost = 2 * GB
+        c = _make_creator(
+            max_gpu_total_bytes=total_gpu,
+            total_kv_per_token=80,
+            target_kv_per_token=80,
+            total_kv_intercept=draft_fixed_cost,
+            target_kv_intercept=0,
+        )
+
+        target_config, draft_config = c._split_kv_cache_budget_for_draft("max_gpu_total_bytes")
+
+        assert draft_config is not None
+        assert target_config.max_gpu_total_bytes == total_gpu - draft_fixed_cost
+        assert draft_config.max_gpu_total_bytes == draft_fixed_cost
+
+    def test_v2_fixed_only_draft_quota_is_slot_aligned_for_resume(self):
+        total_gpu = 10 * GB
+        slot_bytes = 327_680
+        usable_slots = 2_432
+        usable_bytes = usable_slots * slot_bytes
+        c = _make_creator(
+            max_gpu_total_bytes=total_gpu,
+            total_kv_per_token=80,
+            target_kv_per_token=80,
+            total_kv_intercept=usable_bytes,
+            target_kv_intercept=0,
+            total_allocation_unit=slot_bytes,
+        )
+        c._is_kv_cache_manager_v2 = True
+
+        target_config, draft_config = c._split_kv_cache_budget_for_draft("max_gpu_total_bytes")
+
+        assert draft_config is not None
+        native_resume_util = struct.unpack("f", struct.pack("f", draft_config.max_util_for_resume))[
+            0
+        ]
+        configured_slots = math.ceil(usable_slots / native_resume_util)
+        # float32(0.95) requires 2561 slots: a byte-level ceil followed by
+        # V2's slot floor would leave only 2560.
+        assert configured_slots == 2_561
+        assert draft_config.max_gpu_total_bytes == configured_slots * slot_bytes
+        assert usable_slots / configured_slots <= native_resume_util
+        assert target_config.max_gpu_total_bytes + draft_config.max_gpu_total_bytes == total_gpu
+
+    def test_v2_splits_two_fixed_only_costs_with_distinct_slot_units(self):
+        total_gpu = 10 * GB
+        target_slot_bytes = 4_096
+        target_fixed = 100 * target_slot_bytes
+        draft_slot_bytes = 327_680
+        draft_usable_slots = 2_432
+        draft_fixed = draft_usable_slots * draft_slot_bytes
+        c = _make_creator(
+            max_gpu_total_bytes=total_gpu,
+            total_kv_per_token=0,
+            target_kv_per_token=0,
+            total_kv_intercept=target_fixed + draft_fixed,
+            target_kv_intercept=target_fixed,
+            target_allocation_unit=target_slot_bytes,
+            draft_allocation_unit=draft_slot_bytes,
+        )
+        c._is_kv_cache_manager_v2 = True
+
+        target_config, draft_config = c._split_kv_cache_budget_for_draft("max_gpu_total_bytes")
+
+        assert draft_config is not None
+        native_resume_util = struct.unpack("f", struct.pack("f", draft_config.max_util_for_resume))[
+            0
+        ]
+        expected_draft_slots = math.ceil(draft_usable_slots / native_resume_util)
+        assert draft_config.max_gpu_total_bytes == expected_draft_slots * draft_slot_bytes
+        assert target_config.max_gpu_total_bytes + draft_config.max_gpu_total_bytes == total_gpu
+
+    @pytest.mark.parametrize(
+        ("total_slope", "target_slope", "total_intercept", "target_intercept"),
+        [
+            (100, 120, 0, 0),
+            (100, 80, 0, 1),
+        ],
+        ids=["negative_draft_slope", "negative_draft_intercept"],
+    )
+    def test_returns_none_when_derived_draft_cost_is_negative(
+        self,
+        total_slope,
+        target_slope,
+        total_intercept,
+        target_intercept,
+    ):
+        c = _make_creator(
+            max_gpu_total_bytes=10 * GB,
+            total_kv_per_token=total_slope,
+            target_kv_per_token=target_slope,
+            total_kv_intercept=total_intercept,
+            target_kv_intercept=target_intercept,
+        )
+
+        target_config, draft_config = c._split_kv_cache_budget_for_draft("max_gpu_total_bytes")
+
+        assert target_config is c._kv_cache_config
+        assert draft_config is None
+
+    def test_returns_none_when_both_costs_are_zero(self):
+        c = _make_creator(
+            max_gpu_total_bytes=10 * GB,
+            total_kv_per_token=0,
+            target_kv_per_token=0,
+        )
+
+        target_config, draft_config = c._split_kv_cache_budget_for_draft("max_gpu_total_bytes")
+
+        assert target_config is c._kv_cache_config
+        assert draft_config is None
+
+    def test_budget_share_helper_splits_fixed_only_costs(self):
+        c = object.__new__(KvCacheCreator)
+
+        shares = c._compute_draft_budget_shares(
+            total_budget=1_000,
+            target_kv=CacheCost(slope=0, intercept=100),
+            draft_kv=CacheCost(slope=0, intercept=200),
+        )
+
+        assert shares == (800, 200)
+
+    def test_budget_share_helper_accepts_exact_fixed_quota(self):
+        c = object.__new__(KvCacheCreator)
+
+        shares = c._compute_draft_budget_shares(
+            total_budget=300,
+            target_kv=CacheCost(slope=0, intercept=100),
+            draft_kv=CacheCost(slope=0, intercept=200),
+        )
+
+        assert shares == (100, 200)
 
 
 class TestSplitHostCacheBudgetForDraft:

@@ -14,7 +14,9 @@
 
 import copy
 import dataclasses
+import math
 import os
+import struct
 from typing import TYPE_CHECKING, Dict, List, Optional, Union
 
 import torch
@@ -296,10 +298,12 @@ def get_kv_cache_manager_cls(
 # KVCacheManager.get_cache_size_per_token may return either an ``int``
 # (legacy proportional model ``bytes = slope * tokens``) or an affine
 # ``(slope, intercept)`` tuple (CppMambaHybridCacheManager, where mamba
-# state introduces a per-batch fixed cost).  KVCacheManagerV2 reports
-# sliding-window attention fixed cost in the tuple intercept.  CacheCost
-# normalizes the combined shape so the rest of the file does plain attribute
-# access and method calls instead of branching on type.
+# state introduces a per-batch fixed cost), or a
+# ``(slope, intercept, allocation_unit)`` tuple. KVCacheManagerV2 reports
+# sliding-window attention fixed cost and its indivisible pool-slot size in
+# the latter form. CacheCost normalizes the combined shape so the rest of the
+# file does plain attribute access and method calls instead of branching on
+# type.
 
 
 @dataclasses.dataclass(frozen=True)
@@ -310,6 +314,7 @@ class CacheCost:
     """
     slope: int
     intercept: int = 0
+    allocation_unit: int = dataclasses.field(default=1, compare=False)
 
     @classmethod
     def from_raw(cls, raw) -> "CacheCost":
@@ -317,15 +322,39 @@ class CacheCost:
         if isinstance(raw, CacheCost):
             return raw
         if isinstance(raw, tuple):
-            slope, intercept = raw
-            return cls(slope=int(slope), intercept=int(intercept))
+            if len(raw) == 2:
+                slope, intercept = raw
+                allocation_unit = 1
+            elif len(raw) == 3:
+                slope, intercept, allocation_unit = raw
+            else:
+                raise ValueError(
+                    "Cache cost tuples must contain slope/intercept and an "
+                    f"optional allocation unit, got {len(raw)} values")
+            return cls(
+                slope=int(slope),
+                intercept=int(intercept),
+                allocation_unit=int(allocation_unit),
+            )
         return cls(slope=int(raw))
 
     def __add__(self, other: "CacheCost") -> "CacheCost":
         if not isinstance(other, CacheCost):
             return NotImplemented
-        return CacheCost(slope=self.slope + other.slope,
-                         intercept=self.intercept + other.intercept)
+        if self.intercept == 0:
+            allocation_unit = other.allocation_unit
+        elif other.intercept == 0:
+            allocation_unit = self.allocation_unit
+        else:
+            # A combined fixed cost can be represented only at a granularity
+            # common to both component pools.
+            allocation_unit = math.gcd(self.allocation_unit,
+                                       other.allocation_unit)
+        return CacheCost(
+            slope=self.slope + other.slope,
+            intercept=self.intercept + other.intercept,
+            allocation_unit=allocation_unit,
+        )
 
     def __str__(self) -> str:
         if self.intercept == 0:
@@ -343,6 +372,29 @@ class CacheCost:
     def bytes_for_tokens(self, tokens: int) -> int:
         """Token count -> memory bytes."""
         return self.slope * tokens + self.intercept
+
+
+def _quota_for_resumable_bytes(
+    usable_bytes: int,
+    resume_util: float,
+    allocation_unit: int = 1,
+) -> int:
+    """Convert a V2 usable-capacity floor to its required configured quota."""
+    if not 0 < resume_util <= 1:
+        raise ValueError(
+            f"max_util_for_resume must be in (0, 1], got {resume_util}")
+    if allocation_unit <= 0:
+        raise ValueError(
+            f"allocation_unit must be positive, got {allocation_unit}")
+    # The C++ config stores max_util_for_resume as float32. Use the same value
+    # here so the quota remains sufficient after the binding conversion (0.95
+    # becomes 0.949999988...). Convert in allocation units rather than bytes:
+    # V2 floors a byte quota to whole pool slots, so byte-level rounding can
+    # otherwise leave one fewer slot than resume() permits at the watermark.
+    native_resume_util = struct.unpack("f", struct.pack("f", resume_util))[0]
+    usable_units = math.ceil(usable_bytes / allocation_unit)
+    configured_units = math.ceil(usable_units / native_resume_util)
+    return configured_units * allocation_unit
 
 
 def get_attention_workspace_bytes_per_token(model_config, mapping) -> int:
@@ -716,6 +768,7 @@ class KvCacheCreator:
                 tokens_per_block=self._tokens_per_block,
                 max_seq_len=self._max_seq_len,
                 max_batch_size=self._max_batch_size,
+                max_num_tokens=getattr(self, "_max_num_tokens", 0),
                 kv_cache_config=kv_cache_config,
                 spec_config=self._speculative_config,
                 **extra_kwargs))
@@ -749,14 +802,29 @@ class KvCacheCreator:
             use_separate_draft_kv_cache=use_separate_draft_kv_cache)
         if self._is_encoder_decoder():
             total += CacheCost.from_raw(self._get_cross_kv_size_per_token())
+        draft_cost = self._get_draft_cache_cost(
+            kv_cache_config,
+            use_separate_draft_kv_cache=use_separate_draft_kv_cache,
+        )
+        if draft_cost is not None:
+            total += draft_cost
+        return total
+
+    def _get_draft_cache_cost(
+        self,
+        kv_cache_config: KvCacheConfig,
+        *,
+        use_separate_draft_kv_cache: bool,
+    ) -> Optional[CacheCost]:
+        """Return the draft manager's standalone cache cost, if it has one."""
         if self._draft_model_engine is not None:
             draft_model_config = self._draft_model_engine.model.model_config
             draft_kv_cache_manager_cls = self._get_model_kv_cache_manager_cls(
                 self._draft_model_engine, kv_cache_config)
-            total += self._per_manager_cache_cost(draft_kv_cache_manager_cls,
-                                                  draft_model_config,
-                                                  kv_cache_config)
-        elif use_separate_draft_kv_cache:
+            return self._per_manager_cache_cost(draft_kv_cache_manager_cls,
+                                                draft_model_config,
+                                                kv_cache_config)
+        if use_separate_draft_kv_cache:
             # One-model draft with separate KV cache layout.
             # Pass num_layers explicitly since the HF config may report a
             # different layer count than what is actually used at runtime
@@ -774,18 +842,19 @@ class KvCacheCreator:
                     effective_draft_config,
                     draft_kv_cache_config,
                     is_disagg=self._is_disagg)
-                total += self._per_manager_cache_cost(
-                    draft_kv_cache_manager_cls, effective_draft_config,
-                    draft_kv_cache_config)
+                return self._per_manager_cache_cost(draft_kv_cache_manager_cls,
+                                                    effective_draft_config,
+                                                    draft_kv_cache_config,
+                                                    is_draft=True)
             elif self._mapping.is_last_pp_rank():
                 # EAGLE3/MTP: draft layers only on last PP rank
-                total += self._per_manager_cache_cost(
+                return self._per_manager_cache_cost(
                     self._kv_cache_manager_cls,
                     effective_draft_config,
                     draft_kv_cache_config,
                     num_layers=self._get_num_draft_layers(),
                     is_draft=True)
-        return total
+        return None
 
     def _cal_max_memory(self, peak_memory, total_gpu_memory, fraction,
                         allocated_bytes: int) -> int:
@@ -1539,7 +1608,6 @@ class KvCacheCreator:
         """Per-manager KV cache costs for target and draft layers."""
         target_kv_cache_config = (kv_cache_config if kv_cache_config is not None
                                   else self._kv_cache_config)
-        total_kv = self._get_kv_size_per_token(target_kv_cache_config)
         use_separate_draft_kv_cache = (
             self._should_create_separate_draft_kv_cache())
         target_kv = self._per_manager_cache_cost(
@@ -1547,11 +1615,18 @@ class KvCacheCreator:
             self._model_engine.model.model_config,
             target_kv_cache_config,
             use_separate_draft_kv_cache=use_separate_draft_kv_cache)
-        # The draft contribution is whatever the aggregate has on top of the
-        # target. Both pieces are CacheCost; subtraction is component-wise.
-        draft_kv = CacheCost(slope=total_kv.slope - target_kv.slope,
-                             intercept=total_kv.intercept - target_kv.intercept)
-        if target_kv.slope <= 0 or draft_kv.slope <= 0:
+        # Estimate the draft component directly. Aggregate-minus-target loses
+        # the draft pool's allocation unit when both managers have fixed SWA
+        # costs, which can under-reserve one slot at the resume watermark.
+        draft_kv = self._get_draft_cache_cost(
+            target_kv_cache_config,
+            use_separate_draft_kv_cache=use_separate_draft_kv_cache,
+        )
+        if draft_kv is None:
+            return None
+        costs = (target_kv, draft_kv)
+        if any(cost.slope < 0 or cost.intercept < 0 or (
+                cost.slope == 0 and cost.intercept == 0) for cost in costs):
             return None
         return target_kv, draft_kv
 
@@ -1560,20 +1635,40 @@ class KvCacheCreator:
         total_budget: int,
         target_kv: CacheCost,
         draft_kv: CacheCost,
+        target_resume_util: float = 1.0,
+        draft_resume_util: float = 1.0,
     ) -> Optional[tuple[int, int]]:
         """Split *total_budget* into (target_budget, draft_budget) byte shares."""
-        intercept_total = target_kv.intercept + draft_kv.intercept
-        slope_budget = total_budget - intercept_total
-        if slope_budget <= 0:
+        target_fixed_quota = _quota_for_resumable_bytes(
+            target_kv.intercept,
+            target_resume_util,
+            target_kv.allocation_unit,
+        )
+        draft_fixed_quota = _quota_for_resumable_bytes(
+            draft_kv.intercept,
+            draft_resume_util,
+            draft_kv.allocation_unit,
+        )
+        fixed_quota_total = target_fixed_quota + draft_fixed_quota
+        slope_budget = total_budget - fixed_quota_total
+        if slope_budget < 0:
             logger.warning(
                 f"KV cache budget {total_budget} is smaller than the fixed "
-                f"mamba state cost {intercept_total}; cannot split between "
+                f"resumable cache quota {fixed_quota_total}; cannot split between "
                 f"target and draft.")
             return None
         slope_total = target_kv.slope + draft_kv.slope
-        draft_slope_share = int(slope_budget * draft_kv.slope / slope_total)
-        draft_budget = draft_kv.intercept + draft_slope_share
+        # Two fixed-only managers have no proportional growth component. Give
+        # each its resumable fixed quota and leave any spare budget on the
+        # target manager. This still partitions the configured budget instead
+        # of letting both managers inherit it in full.
+        draft_slope_share = (int(slope_budget * draft_kv.slope /
+                                 slope_total) if slope_total > 0 else 0)
+        draft_budget = draft_fixed_quota + draft_slope_share
         target_budget = total_budget - draft_budget
+        assert target_budget + draft_budget == total_budget
+        assert target_budget >= target_fixed_quota
+        assert draft_budget >= draft_fixed_quota
         return target_budget, draft_budget
 
     def _split_kv_cache_budget_for_draft(
@@ -1600,7 +1695,7 @@ class KvCacheCreator:
         GPU-resident state never occupies) the intercept is dropped so the split
         stays proportional to the per-token cost.
 
-        When the split is *infeasible* (the combined fixed cost meets or exceeds
+        When the split is *infeasible* (the combined fixed cost exceeds
         the budget — only possible for ``max_gpu_total_bytes`` after the above)
         the shortfall is fatal: both managers need their fixed state resident in
         GPU memory, so the run would OOM. It raises ``ValueError`` rather than
@@ -1630,11 +1725,32 @@ class KvCacheCreator:
             target_kv = CacheCost(slope=target_kv.slope)
             draft_kv = CacheCost(slope=draft_kv.slope)
 
-        shares = self._compute_draft_budget_shares(total_budget, target_kv,
-                                                   draft_kv)
+        target_resume_util = 1.0
+        draft_resume_util = 1.0
+        if (budget_attr == "max_gpu_total_bytes"
+                and getattr(self, "_is_kv_cache_manager_v2", False)):
+            target_resume_util = target_kv_cache_config.max_util_for_resume
+            draft_resume_util = (draft_kv_cache_config.max_util_for_resume
+                                 if draft_kv_cache_config is not None else
+                                 target_resume_util)
+        shares = self._compute_draft_budget_shares(
+            total_budget,
+            target_kv,
+            draft_kv,
+            target_resume_util,
+            draft_resume_util,
+        )
         if shares is None:
-            # The split is infeasible (combined fixed cost >= total budget).
-            intercept_total = target_kv.intercept + draft_kv.intercept
+            # The split is infeasible (combined fixed cost > total budget).
+            fixed_quota_total = _quota_for_resumable_bytes(
+                target_kv.intercept,
+                target_resume_util,
+                target_kv.allocation_unit,
+            ) + _quota_for_resumable_bytes(
+                draft_kv.intercept,
+                draft_resume_util,
+                draft_kv.allocation_unit,
+            )
             if budget_attr == "max_gpu_total_bytes":
                 # A GPU budget that cannot even fit the combined fixed cost is
                 # fatal: both managers need their fixed state resident in GPU
@@ -1642,8 +1758,8 @@ class KvCacheCreator:
                 # guidance rather than producing an unusable zero-budget draft.
                 raise ValueError(
                     f"KV cache GPU budget ({total_budget / GB:.2f} GiB) is "
-                    f"smaller than the combined fixed cost "
-                    f"({intercept_total / GB:.2f} GiB, e.g. mamba SSM state) "
+                    f"smaller than the combined resumable fixed quota "
+                    f"({fixed_quota_total / GB:.2f} GiB, e.g. SWA or mamba state) "
                     f"for target+draft. Increase free_gpu_memory_fraction or "
                     f"max_gpu_total_bytes, or reduce max_batch_size (the fixed "
                     f"cost scales with batch size).")
@@ -3064,6 +3180,8 @@ def create_py_executor_instance(
             cross_kv_cache_manager=cross_kv_cache_manager,
             no_schedule_until_state=no_schedule_until_state,
             enable_prefix_aware_scheduling=enable_prefix_aware_scheduling,
+            # A disaggregated generation worker must not replay context locally.
+            enable_recompute_pause=not is_disagg,
         )
     elif (scheduler_config is not None
           and scheduler_config.use_python_scheduler):

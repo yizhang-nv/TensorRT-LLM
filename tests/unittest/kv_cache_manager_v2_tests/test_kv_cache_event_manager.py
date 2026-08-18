@@ -1034,6 +1034,33 @@ def test_v2_kv_cache_event_manager_uses_stored_registry_for_removed_event(
     assert "layer_groups" not in events[1]["data"]
 
 
+def test_v2_kv_cache_event_manager_attaches_registered_mm_keys(real_block_factory):
+    event_manager = NativeKVCacheEventManager(max_kv_event_entries=8, window_size=128)
+    make_block = real_block_factory(event_manager)
+    block = make_block([1, 2], [2])
+    block_key = _block_key(block)
+    mm_hash = bytes(range(32))
+
+    event_manager.register_mm_keys(block_key, [(mm_hash, 0, "image-uuid")])
+    _add_stored_block(event_manager, block)
+    events = _flush_serialized_events(event_manager)
+
+    assert events[0]["data"]["blocks"][0]["mm_keys"] == [
+        {
+            "type": "mm_key",
+            "hash": "image-uuid",
+            "start_offset": 0,
+        }
+    ]
+
+    # The metadata follows the stored block's lifetime. Removing the final
+    # life cycle must release it, so the same radix key can later be associated
+    # with different metadata instead of retaining an orphaned map entry.
+    event_manager.add_removed_event(block_key)
+    _flush_serialized_events(event_manager)
+    event_manager.register_mm_keys(block_key, [(bytes(reversed(range(32))), 1, None)])
+
+
 def test_v2_kv_cache_event_manager_omits_partial_life_cycle_coverage(
     real_block_factory,
 ):

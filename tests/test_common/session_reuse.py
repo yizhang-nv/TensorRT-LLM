@@ -71,27 +71,41 @@ _RETIRE_THREADS: list = []
 _RETIRE_LOCK = threading.Lock()
 
 
+class _RetirementTimeoutError(TimeoutError):
+    """A pool still owns resources after the retirement fence expired."""
+
+
 def _reap_retires(timeout: float = 60.0) -> None:
     """Join in-flight retire threads (bounded); no-op when none are running.
 
     A retired pool's workers hold their (full-model) GPU memory until they
     exit; the retire thread blocks on that exit (``wait_shutdown=True``), but
     it is a BACKGROUND thread — the test hot path never waits on it. Before
-    an instant cached-pool handover, joining in-flight retires is what makes
-    the handover safe against a corpse still releasing (e.g. the duplicate
-    retired by ``_release`` moments earlier); every other path spawns fresh
-    (~50s), which outlasts the release naturally. Also called at drain
-    rendezvous points so disposals cannot leak past the session.
+    an instant cached or prefetched-pool handover, joining in-flight retires
+    is what makes the handover safe against a corpse still releasing (e.g.
+    the duplicate retired by ``_release`` moments earlier). A synchronous
+    replacement takes ~50s, which outlasts the release naturally. Also
+    called at drain rendezvous points so disposals cannot leak past the
+    session.
     """
+    # Keep the snapshot registered while it is being joined: another
+    # concurrent handover must observe and join the same retirements instead
+    # of seeing an empty list and racing their GPU-memory release.
     with _RETIRE_LOCK:
-        in_flight, _RETIRE_THREADS[:] = list(_RETIRE_THREADS), []
+        in_flight = list(_RETIRE_THREADS)
+    timed_out = []
     for t in in_flight:
         t.join(timeout=timeout)
         if t.is_alive():
-            print(
-                "[session-reuse] WARNING: pool retirement did not finish within 60s",
-                flush=True,
-            )
+            timed_out.append(t)
+    with _RETIRE_LOCK:
+        # Preserve retirements appended after the snapshot, plus any snapshot
+        # entry that exceeded the bounded join so a later handover can retry.
+        _RETIRE_THREADS[:] = [t for t in _RETIRE_THREADS if t not in in_flight or t.is_alive()]
+    if timed_out:
+        raise _RetirementTimeoutError(
+            f"{len(timed_out)} pool retirement(s) did not finish within {timeout:g}s"
+        )
 
 
 def _prefetcher():
@@ -232,12 +246,14 @@ class SessionReuseCache:
                 pass
 
         t = threading.Thread(target=_dispose, daemon=True, name="session-reuse-retire")
-        t.start()
         # Track in-flight disposals so drain() can reap them at natural
         # rendezvous points (failure fence / session finish) with a bounded
         # join; the hot path stays non-blocking and daemon=True still
         # guarantees a wedged disposal cannot hang interpreter exit.
         with _RETIRE_LOCK:
+            # Start and register atomically with respect to reaper snapshots;
+            # a registered Thread is therefore always safe to join.
+            t.start()
             _RETIRE_THREADS.append(t)
 
     # ---- factory installed at the pool-creation seam ----
@@ -323,9 +339,16 @@ class SessionReuseCache:
                     # workers' exit (wait_shutdown=True) but run in the
                     # BACKGROUND, so join any in flight (a duplicate retired
                     # by _release moments ago held full model memory). No-op
-                    # on the common path; every non-cached path spawns fresh
-                    # (~50s), which outlasts the release naturally.
+                    # on the common path; prefetched misses apply the same
+                    # fence in _spawn_fresh before their instant handover.
                     _reap_retires()
+                except _RetirementTimeoutError:
+                    # This candidate was already removed from the cache. Do
+                    # not expose it while another pool may still own the same
+                    # GPUs, and do not synchronously spawn a third pool.
+                    self._retire(real)
+                    raise
+                try:
                     submit_sync_per_worker(real, reset_worker_torch_compile_state)
                     print(
                         f"[session-reuse] reusing {n_workers}-worker pool "
@@ -370,6 +393,19 @@ class SessionReuseCache:
             # Unexpected prefetcher errors also propagate instead of silently
             # hiding lifecycle bugs behind a synchronous fallback.
             real = prefetcher.take(n_workers)
+            if real is not None:
+                # Taking a ready shadow is an instant handover, so a pool
+                # retired on this miss may still hold its full model on the
+                # same GPUs. Fence it exactly like the cached fast path before
+                # exposing the replacement to the next LLM construction.
+                try:
+                    _reap_retires()
+                except _RetirementTimeoutError:
+                    # take() transfers ownership to this cache. Dispose the
+                    # unexposed shadow and propagate instead of leaking it or
+                    # starting another pool on an unsafe allocation.
+                    self._retire(real)
+                    raise
         if real is None:
             # One attempt gets the full worker-bootstrap deadline. If identity
             # collection still fails, unidentified workers may remain alive;

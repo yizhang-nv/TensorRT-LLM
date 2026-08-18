@@ -426,6 +426,27 @@ class Eagle3OneModelDynamicTreeWorker(Eagle3OneModelWorker):
             "update_kv_cache_draft_token_location_2d requires uniform num_kv_heads across all layers, "
             f"but got {cache_mgr.num_kv_heads_per_layer}"
         )
+        effective_attention_windows = {
+            cache_mgr.max_seq_len if window is None else window
+            for window in cache_mgr.max_attention_window_vec
+        }
+        if len(effective_attention_windows) != 1:
+            raise NotImplementedError(
+                "Eagle3 dynamic-tree KV relocation requires a uniform "
+                "attention window, "
+                f"but got {cache_mgr.max_attention_window_vec}"
+            )
+        max_kv_cache_len = effective_attention_windows.pop()
+
+        pool_mapping = getattr(cache_mgr, "kv_cache_pool_mapping", None)
+        if pool_mapping is not None:
+            pool_indices = {int(mapping[0]) for mapping in pool_mapping}
+            if len(pool_indices) != 1:
+                raise NotImplementedError(
+                    "Eagle3 dynamic-tree KV relocation requires all layers "
+                    "in one KV cache pool, "
+                    f"but got pools {sorted(pool_indices)}"
+                )
         torch.ops.tensorrt_llm.update_kv_cache_draft_token_location_2d(
             self._accepted_draft_indices_tensor[:batch_size],
             self._num_accepted_tokens_buf[:batch_size],
@@ -437,7 +458,7 @@ class Eagle3OneModelDynamicTreeWorker(Eagle3OneModelWorker):
             cache_mgr.num_kv_heads_per_layer[0],
             self._kv_head_dim_bytes,
             cache_mgr.max_total_draft_tokens,
-            cache_mgr.max_attention_window_vec[0],
+            max_kv_cache_len,
             cache_mgr.kv_cache_pool_pointers,
             attn_metadata.kv_cache_block_offsets,
             cache_mgr.max_blocks_per_seq,

@@ -121,6 +121,17 @@ void EventManager::setLayerGroupWindowSizes(std::map<int, int> windowSizes)
     mWindowSizeByLayerGroup = std::move(windowSizes);
 }
 
+void EventManager::registerMmKeys(Digest const& blockKey, std::vector<MmKey> mmKeys)
+{
+    std::lock_guard<std::mutex> lock(mMutex);
+    auto const existing = mMmKeysByBlockKey.find(blockKey);
+    if (existing != mMmKeysByBlockKey.end() && existing->second != mmKeys)
+    {
+        throw std::invalid_argument("Conflicting multimodal metadata for KV cache block");
+    }
+    mMmKeysByBlockKey.insert_or_assign(blockKey, std::move(mmKeys));
+}
+
 void EventManager::addStoredEvent(KVCacheStoredData data, EventLayerGroupId layerGroupId)
 {
     if (data.blocks.empty() || mMaxKvEventEntries <= 0)
@@ -577,8 +588,13 @@ std::optional<KVCacheStoredBlockData> EventManager::storedBlockFromBlock(
             tokens.push_back(std::move(uniqueToken));
         }
     }
+    std::vector<MmKey> mmKeys;
+    if (auto const iter = mMmKeysByBlockKey.find(block.key); iter != mMmKeysByBlockKey.end())
+    {
+        mmKeys = iter->second;
+    }
     return KVCacheStoredBlockData{
-        hashFromBlock(block), std::move(tokens), cacheLevel.value(), priority, {}, std::nullopt};
+        hashFromBlock(block), std::move(tokens), cacheLevel.value(), priority, std::move(mmKeys), std::nullopt};
 }
 
 uint64_t EventManager::hashV1BlockKey(std::vector<TokenId> const& tokens, uint64_t parentHash,
@@ -681,6 +697,7 @@ uint64_t EventManager::fallbackV1Hash(Digest const& blockKey)
 
 void EventManager::dropHashCache(Digest const& blockKey)
 {
+    mMmKeysByBlockKey.erase(blockKey);
     mV1HashByBlockKey.erase(blockKey);
     mV1HashCompatibleKeys.erase(blockKey);
     mV1RootAttrsByBlockKey.erase(blockKey);

@@ -40,6 +40,8 @@ from tensorrt_llm._torch.pyexecutor._util import \
 from tensorrt_llm._torch.pyexecutor.py_executor_creator import \
     _extend_full_attention_windows_for_spec_decode
 from tensorrt_llm._torch.speculative.eagle3 import Eagle3OneModelSpecMetadata
+from tensorrt_llm._torch.speculative.eagle3_dynamic_tree import \
+    Eagle3OneModelDynamicTreeWorker
 from tensorrt_llm._torch.speculative.mtp_dynamic_tree import \
     MTPEagleDynamicTreeWorker
 from tensorrt_llm.executor.request import LoRARequest
@@ -183,6 +185,111 @@ def test_mtp_dynamic_tree_relocation_uses_full_attention_window(
     assert args[8] == cache_manager.max_seq_len
     assert args[9] is attention_pool_pointers
     assert args[10] is attention_block_offsets
+
+
+@pytest.mark.parametrize(
+    ("attention_windows", "expected_max_kv_cache_len"),
+    [
+        pytest.param([None], 8192, id="v2_full_attention"),
+        pytest.param([None, 8192], 8192, id="equivalent_full_attention"),
+        pytest.param([2048], 2048, id="finite_swa"),
+        pytest.param([2048, 2048], 2048, id="repeated_finite_swa"),
+    ],
+)
+def test_eagle3_dynamic_tree_relocation_uses_attention_window(
+        attention_windows: list[int | None], expected_max_kv_cache_len: int,
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    worker = object.__new__(Eagle3OneModelDynamicTreeWorker)
+    worker._kv_head_dim_bytes = 256
+    worker._accepted_draft_indices_tensor = torch.tensor([[0, 1], [2, -1]],
+                                                         dtype=torch.int32)
+    worker._num_accepted_tokens_buf = torch.tensor([2, 1], dtype=torch.int32)
+
+    pool_pointers = object()
+    block_offsets = object()
+    cache_manager = SimpleNamespace(
+        num_kv_heads_per_layer=[8, 8],
+        num_layers=2,
+        max_attention_window_vec=attention_windows,
+        max_seq_len=8192,
+        max_total_draft_tokens=31,
+        kv_cache_pool_pointers=pool_pointers,
+        kv_cache_pool_mapping=[[0, 0], [0, 1]],
+        max_blocks_per_seq=256,
+        tokens_per_block=32,
+    )
+    attention_metadata = SimpleNamespace(
+        kv_cache_manager=cache_manager,
+        kv_lens_cuda=torch.tensor([128, 256], dtype=torch.int32),
+        kv_cache_block_offsets=block_offsets,
+    )
+    update_op = MagicMock()
+    monkeypatch.setattr(
+        torch.ops.tensorrt_llm,
+        "update_kv_cache_draft_token_location_2d",
+        update_op,
+    )
+
+    worker._relocate_kv_eagerly(attention_metadata, batch_size=2)
+
+    update_op.assert_called_once()
+    args = update_op.call_args.args
+    assert args[4] == cache_manager.num_layers
+    assert args[5] == cache_manager.num_kv_heads_per_layer[0]
+    assert args[8] == expected_max_kv_cache_len
+    assert args[9] is pool_pointers
+    assert args[10] is block_offsets
+
+
+@pytest.mark.parametrize(
+    ("attention_windows", "pool_mapping", "error_match"),
+    [
+        pytest.param(
+            [None, 2048],
+            None,
+            "requires a uniform attention window",
+            id="vswa",
+        ),
+        pytest.param(
+            [2048, 2048],
+            [[0, 0], [1, 0]],
+            "requires all layers in one KV cache pool",
+            id="multiple_pools",
+        ),
+    ],
+)
+def test_eagle3_dynamic_tree_relocation_rejects_unsupported_layout(
+        attention_windows: list[int | None],
+        pool_mapping: list[list[int]] | None, error_match: str,
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    worker = object.__new__(Eagle3OneModelDynamicTreeWorker)
+    worker._kv_head_dim_bytes = 256
+    worker._accepted_draft_indices_tensor = torch.tensor([[0, 1]],
+                                                         dtype=torch.int32)
+    worker._num_accepted_tokens_buf = torch.tensor([2], dtype=torch.int32)
+
+    cache_manager = SimpleNamespace(
+        num_kv_heads_per_layer=[8, 8],
+        num_layers=2,
+        max_attention_window_vec=attention_windows,
+        max_seq_len=8192,
+        kv_cache_pool_mapping=pool_mapping,
+    )
+    attention_metadata = SimpleNamespace(
+        kv_cache_manager=cache_manager,
+        kv_lens_cuda=torch.tensor([128], dtype=torch.int32),
+    )
+    update_op = MagicMock()
+    monkeypatch.setattr(
+        torch.ops.tensorrt_llm,
+        "update_kv_cache_draft_token_location_2d",
+        update_op,
+    )
+
+    with pytest.raises(NotImplementedError, match=error_match):
+        worker._relocate_kv_eagerly(attention_metadata, batch_size=1)
+
+    update_op.assert_not_called()
 
 
 def test_eagle3_draft_kv_cache_uses_full_window_when_draft_has_no_swa() -> None:

@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Pure-logic tests for automatic MPI session reuse — no MPI, no GPU."""
 
+import threading
+
 import pytest
 from test_common import session_reuse
 from test_common.session_reuse import SessionReuseCache
@@ -99,6 +101,181 @@ def test_cached_handover_reaps_in_flight_retires(reuse_cache):
     assert s3._real is kept
     assert not session_reuse._RETIRE_THREADS  # handover joined the retire
     assert dup.shut  # corpse fully disposed before the handover returned
+
+
+def test_prefetched_handover_reaps_retired_pool_before_return(reuse_cache, monkeypatch):
+    monkeypatch.setenv("TRTLLM_TEST_REUSE_MAX_USES", "1")
+    retire_started = threading.Event()
+    allow_retire = threading.Event()
+    shadow_taken = threading.Event()
+    acquire_finished = threading.Event()
+
+    class _BlockingRetirePool(_FakePool):
+        def shutdown(self):
+            retire_started.set()
+            allow_retire.wait()
+            super().shutdown()
+
+    first_session = reuse_cache.acquire(_BlockingRetirePool, 2)
+    retired = first_session._real
+    first_session.shutdown()
+
+    shadow = _FakePool(
+        2,
+        wait_shutdown=True,
+        env_overrides={"TRTLLM_HF_WEIGHT_CACHE": "1"},
+    )
+    reuse_cache.prefetch.shadow = shadow
+    original_take = reuse_cache.prefetch.take
+
+    def _record_take(n_workers):
+        pool = original_take(n_workers)
+        if pool is shadow:
+            shadow_taken.set()
+        return pool
+
+    reuse_cache.prefetch.take = _record_take
+    result = []
+    errors = []
+
+    def _acquire_replacement():
+        try:
+            result.append(reuse_cache.acquire(_FakePool, 2))
+        except Exception as error:
+            errors.append(error)
+        finally:
+            acquire_finished.set()
+
+    acquire_thread = threading.Thread(target=_acquire_replacement, daemon=True)
+    acquire_thread.start()
+    try:
+        assert retire_started.wait(timeout=10)
+        assert shadow_taken.wait(timeout=10)
+        assert not acquire_finished.wait(timeout=0.2)
+        with session_reuse._RETIRE_LOCK:
+            assert len(session_reuse._RETIRE_THREADS) == 1
+    finally:
+        allow_retire.set()
+        acquire_thread.join(timeout=10)
+        session_reuse._reap_retires()
+
+    assert not acquire_thread.is_alive()
+    assert not errors
+    assert len(result) == 1
+    assert result[0]._real is shadow
+    assert retired.shut
+    result[0].shutdown()
+    reuse_cache.drain()
+    assert shadow.shut
+
+
+def test_cached_handover_fails_closed_on_retire_timeout(reuse_cache, monkeypatch):
+    retire_started = threading.Event()
+    allow_retire = threading.Event()
+    candidate_retired = threading.Event()
+    sync_spawns = []
+
+    class _CachedCandidatePool(_FakePool):
+        def shutdown(self):
+            super().shutdown()
+            candidate_retired.set()
+
+    class _BlockingRetirePool(_FakePool):
+        def shutdown(self):
+            retire_started.set()
+            allow_retire.wait()
+            super().shutdown()
+
+    class _RecordingPool(_FakePool):
+        def __init__(self, *args, **kwargs):
+            sync_spawns.append((args, kwargs))
+            super().__init__(*args, **kwargs)
+
+    candidate_session = reuse_cache.acquire(_CachedCandidatePool, 2)
+    duplicate_session = reuse_cache.acquire(_BlockingRetirePool, 2)
+    candidate = candidate_session._real
+    duplicate = duplicate_session._real
+    candidate_session.shutdown()  # cached candidate for the instant handover
+    duplicate_session.shutdown()  # duplicate retires in the background
+    assert retire_started.wait(timeout=10)
+
+    original_reap = session_reuse._reap_retires
+
+    def _short_reap():
+        return original_reap(timeout=0.01)
+
+    monkeypatch.setattr(session_reuse, "_reap_retires", _short_reap)
+    restocks_before = len(reuse_cache.prefetch.restocks)
+    try:
+        with pytest.raises(session_reuse._RetirementTimeoutError, match="pool retirement"):
+            reuse_cache.acquire(_RecordingPool, 2)
+        assert candidate_retired.wait(timeout=10)
+        assert candidate.shut
+        assert not duplicate.shut
+        assert sync_spawns == []
+        assert len(reuse_cache.prefetch.restocks) == restocks_before
+    finally:
+        allow_retire.set()
+        original_reap(timeout=10)
+
+    assert duplicate.shut
+
+
+def test_prefetched_handover_fails_closed_on_retire_timeout(reuse_cache, monkeypatch):
+    monkeypatch.setenv("TRTLLM_TEST_REUSE_MAX_USES", "1")
+    retire_started = threading.Event()
+    allow_retire = threading.Event()
+    shadow_retired = threading.Event()
+    sync_spawns = []
+
+    class _BlockingRetirePool(_FakePool):
+        def shutdown(self):
+            retire_started.set()
+            allow_retire.wait()
+            super().shutdown()
+
+    class _TrackedShadowPool(_FakePool):
+        def shutdown(self):
+            super().shutdown()
+            shadow_retired.set()
+
+    class _RecordingPool(_FakePool):
+        def __init__(self, *args, **kwargs):
+            sync_spawns.append((args, kwargs))
+            super().__init__(*args, **kwargs)
+
+    first_session = reuse_cache.acquire(_BlockingRetirePool, 2)
+    retired = first_session._real
+    first_session.shutdown()
+    shadow = _TrackedShadowPool(
+        2,
+        wait_shutdown=True,
+        env_overrides={"TRTLLM_HF_WEIGHT_CACHE": "1"},
+    )
+    reuse_cache.prefetch.shadow = shadow
+
+    original_reap = session_reuse._reap_retires
+
+    def _short_reap():
+        return original_reap(timeout=0.01)
+
+    monkeypatch.setattr(session_reuse, "_reap_retires", _short_reap)
+    restocks_before = len(reuse_cache.prefetch.restocks)
+    try:
+        with pytest.raises(session_reuse._RetirementTimeoutError, match="pool retirement"):
+            reuse_cache.acquire(_RecordingPool, 2)
+        assert retire_started.is_set()
+        assert shadow_retired.wait(timeout=10)
+        assert shadow.shut
+        assert not retired.shut
+        assert reuse_cache.prefetch.shadow is None
+        assert sync_spawns == []
+        assert len(reuse_cache.prefetch.restocks) == restocks_before
+    finally:
+        allow_retire.set()
+        original_reap(timeout=10)
+
+    assert retired.shut
 
 
 def test_cache_miss_takes_prefetched_shadow(reuse_cache):

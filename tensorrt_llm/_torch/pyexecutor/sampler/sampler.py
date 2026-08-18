@@ -2101,7 +2101,7 @@ class TorchSampler(Sampler[SampleStateTorch], AsyncWorkerMixin):
         #        total. The 'sample' below should generally be avoided
         #        by retaining the draft_probs during drafting (TRTLLM-7772).
         draft_sampling_strategy = (
-            ("greedy", None)
+            GREEDY
             if request.py_draft_use_greedy_sampling
             else _request_strategy(request, vocab_size=2**31)
         )
@@ -2553,7 +2553,7 @@ class TorchSampler(Sampler[SampleStateTorch], AsyncWorkerMixin):
             # (e.g. process_draft_tokens -> _handle_stop_criteria -> finish_by),
             # so the comparison is valid at runtime; mypy narrowed it away via the
             # `continue` at the top of the loop and cannot see the mutating calls.
-            if req.state == LlmRequestState.GENERATION_COMPLETE:  # type: ignore[comparison-overlap]
+            if req.state == LlmRequestState.GENERATION_COMPLETE:
                 self._top_p_decay.retire_slot(req)
 
         self._penalty_handler.update_token_counts(finalized_token_updates)
